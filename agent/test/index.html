@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Chat UI (with Image)</title>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #1a1a1a; color: #fff; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        #chat-container { width: 100%; max-width: 600px; background-color: #2a2a2a; border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); display: flex; flex-direction: column; overflow: hidden; }
+        #chat-box { flex-grow: 1; min-height: 400px; max-height: 600px; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 15px; }
+        .message { padding: 12px 16px; border-radius: 8px; max-width: 80%; line-height: 1.5; word-wrap: break-word; }
+        .message.user { align-self: flex-end; background-color: #4a90e2; }
+        .message.agent { align-self: flex-start; background-color: #444; }
+        .message img { max-width: 100%; border-radius: 8px; margin-top: 8px; display: block; }
+        #input-container { padding: 15px; background-color: #333; display: flex; flex-direction: column; gap: 10px; }
+        #image-preview-container { display: flex; gap: 10px; flex-wrap: wrap; }
+        .image-preview { width: 60px; height: 60px; object-fit: cover; border-radius: 8px; border: 2px solid #555; position: relative; }
+        .preview-wrapper { position: relative; display: inline-block; }
+        .remove-btn { position: absolute; top: -5px; right: -5px; background: red; color: white; border: none; border-radius: 50%; width: 20px; height: 20px; cursor: pointer; font-size: 12px; line-height: 12px; padding: 0; }
+        .input-row { display: flex; gap: 10px; }
+        input[type="text"] { flex-grow: 1; padding: 12px; border: none; border-radius: 8px; background-color: #444; color: white; outline: none; }
+        button { padding: 12px 20px; border: none; border-radius: 8px; background-color: #4a90e2; color: white; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        button:hover { background-color: #357abd; }
+        button:disabled { background-color: #555; cursor: not-allowed; }
+        #file-input { display: none; }
+        .upload-btn { background-color: #555; display: flex; align-items: center; justify-content: center; }
+        .upload-btn:hover { background-color: #666; }
+        .loader { border: 3px solid #f3f3f3; border-top: 3px solid #3498db; border-radius: 50%; width: 14px; height: 14px; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+<div id="chat-container">
+    <div id="chat-box">
+        <div class="message agent">안녕하세요! 에이전트입니다. 궁금한 점이 있거나 이미지를 분석해보고 싶으시면 말씀해주세요.</div>
+    </div>
+    <div id="input-container">
+        <div id="image-preview-container"></div>
+        <div class="input-row">
+            <button class="upload-btn" onclick="document.getElementById('file-input').click()">업로드 🖼️</button>
+            <input type="file" id="file-input" accept="image/*" multiple>
+            <input type="text" id="message-input" placeholder="메시지를 입력하세요..." onkeypress="if(event.key === 'Enter') sendMessage()">
+            <button id="send-btn" onclick="sendMessage()">전송</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API_URL = "http://localhost:8001/chat";
+    const fileInput = document.getElementById('file-input');
+    const previewContainer = document.getElementById('image-preview-container');
+    const messageInput = document.getElementById('message-input');
+    const chatBox = document.getElementById('chat-box');
+    const sendBtn = document.getElementById('send-btn');
+    
+    let selectedImages = []; // base64 strings
+    let currentSessionId = localStorage.getItem('agent_session_id');
+
+    fileInput.addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files);
+        if (selectedImages.length + files.length > 3) {
+            alert("이미지는 최대 3개까지만 업로드 가능합니다.");
+            return;
+        }
+
+        for (const file of files) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const base64 = event.target.result;
+                selectedImages.push(base64);
+                renderPreviews();
+            };
+            reader.readAsDataURL(file);
+        }
+        fileInput.value = ''; // reset 
+    });
+
+    function renderPreviews() {
+        previewContainer.innerHTML = '';
+        selectedImages.forEach((imgBase64, index) => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'preview-wrapper';
+            
+            const img = document.createElement('img');
+            img.src = imgBase64;
+            img.className = 'image-preview';
+            
+            const btn = document.createElement('button');
+            btn.className = 'remove-btn';
+            btn.innerText = 'X';
+            btn.onclick = () => {
+                selectedImages.splice(index, 1);
+                renderPreviews();
+            };
+            
+            wrapper.appendChild(img);
+            wrapper.appendChild(btn);
+            previewContainer.appendChild(wrapper);
+        });
+    }
+
+    function appendMessage(text, role, images = []) {
+        const msgDiv = document.createElement('div');
+        msgDiv.className = `message ${role}`;
+        msgDiv.innerText = text;
+
+        images.forEach(imgBase64 => {
+            const img = document.createElement('img');
+            img.src = imgBase64;
+            msgDiv.appendChild(img);
+        });
+
+        chatBox.appendChild(msgDiv);
+        chatBox.scrollTop = chatBox.scrollHeight;
+        return msgDiv;
+    }
+
+    async function sendMessage() {
+        const text = messageInput.value.trim();
+        if (!text && selectedImages.length === 0) return;
+
+        // UI 업데이트
+        appendMessage(text || "이미지 전송", "user", selectedImages);
+        messageInput.value = '';
+        const currentImages = [...selectedImages];
+        selectedImages = [];
+        renderPreviews();
+        
+        sendBtn.disabled = true;
+        sendBtn.innerHTML = '<span class="loader"></span> 전송중';
+
+        try {
+            const res = await fetch(API_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    message: text || "이미지를 분석해줘.",
+                    images: currentImages,
+                    session_id: currentSessionId
+                })
+            });
+
+            if (!res.ok) throw new Error("서버 에러가 발생했습니다.");
+            const data = await res.json();
+            
+            if (data.session_id) {
+                currentSessionId = data.session_id;
+                localStorage.setItem('agent_session_id', data.session_id);
+            }
+            
+            if (data.status === "approval_required") {
+                appendMessage(`⚠️ 승인 필요: ${data.message}`, "agent");
+            } else {
+                appendMessage(data.message || "응답이 없습니다.", "agent");
+            }
+
+        } catch (error) {
+            appendMessage(`❌ 에러: ${error.message}`, "agent");
+        } finally {
+            sendBtn.disabled = false;
+            sendBtn.innerText = '전송';
+        }
+    }
+</script>
+</body>
+</html>
