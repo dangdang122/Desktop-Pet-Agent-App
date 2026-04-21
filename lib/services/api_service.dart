@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class ApiService {
-  final String baseUrl = "http://10.0.2.2:8001";
+  final String baseUrl = "http://192.168.24.206:8001";
   String? sessionId;
 
   Future<Map<String, dynamic>> sendChat(String message) async {
