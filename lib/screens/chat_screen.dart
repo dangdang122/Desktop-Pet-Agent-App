@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../services/api_service.dart';
 import '../services/permission_service.dart';
+import 'dart:async';
 
 class ChatScreen extends StatefulWidget {
   @override
@@ -28,6 +29,7 @@ class _ChatScreenState extends State<ChatScreen> {
   List<ChatMessage> messages = [];
 
   String? pendingToolId;
+  StreamSubscription<Map<String, dynamic>>? _messageSubscription;
 
   @override
   void initState() {
@@ -35,10 +37,41 @@ class _ChatScreenState extends State<ChatScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       requestPermissions();
     });
+
+    api.connect();
+    _messageSubscription = api.messages.listen((response) {
+      String? status = response["status"];
+      String? message = response["message"];
+      
+      if (status == "approval_required") {
+        setState(() {
+          messages.add(ChatMessage(text: "승인 필요 → $message", isUser: false));
+          pendingToolId = response["tool_call_id"];
+        });
+      } else if (status == "error") {
+        setState(() {
+          messages.add(ChatMessage(
+            text: "오류: $message",
+            isUser: false,
+            isError: true,
+          ));
+          pendingToolId = null;
+        });
+      } else {
+        setState(() {
+          messages.add(ChatMessage(text: message ?? "", isUser: false));
+          pendingToolId = null;
+        });
+      }
+      
+      Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
+    });
   }
 
   @override
   void dispose() {
+    _messageSubscription?.cancel();
+    api.disconnect();
     controller.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -54,7 +87,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void sendMessage() async {
+  void sendMessage() {
     if (controller.text.isEmpty) return;
 
     String userMessage = controller.text;
@@ -64,60 +97,18 @@ class _ChatScreenState extends State<ChatScreen> {
       messages.add(ChatMessage(text: userMessage, isUser: true));
     });
 
-    await Future.delayed(const Duration(milliseconds: 50));
-    _scrollToEnd();
+    Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
 
-    try {
-      var response = await api.sendChat(userMessage);
-      String status = response["status"];
-      String message = response["message"];
-
-      if (status == "approval_required") {
-        setState(() {
-          messages.add(ChatMessage(text: "승인 필요 → $message", isUser: false));
-          pendingToolId = response["tool_call_id"];
-        });
-      } else {
-        setState(() {
-          messages.add(ChatMessage(text: message, isUser: false));
-        });
-      }
-    } catch (e) {
-      setState(() {
-        messages.add(ChatMessage(
-          text: "네트워크 오류: ${e.toString()}",
-          isUser: false,
-          isError: true,
-        ));
-      });
-    }
-
-    await Future.delayed(const Duration(milliseconds: 50));
-    _scrollToEnd();
+    api.sendChat(userMessage);
   }
 
-  Future<void> _handleApprove(bool approve) async {
+  void _handleApprove(bool approve) {
     if (pendingToolId == null) return;
 
-    try {
-      var res = await api.approveTool(approve, pendingToolId!);
-      setState(() {
-        messages.add(ChatMessage(text: res["message"], isUser: false));
-        pendingToolId = null;
-      });
-    } catch (e) {
-      setState(() {
-        messages.add(ChatMessage(
-          text: "승인 처리 오류: ${e.toString()}",
-          isUser: false,
-          isError: true,
-        ));
-        pendingToolId = null;
-      });
-    }
-
-    await Future.delayed(const Duration(milliseconds: 50));
-    _scrollToEnd();
+    api.approveTool(approve, pendingToolId!);
+    setState(() {
+      pendingToolId = null;
+    });
   }
 
   Widget _buildBubble(ChatMessage message) {
