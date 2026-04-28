@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:image_picker/image_picker.dart';
 import '../services/api_service.dart';
 import '../services/permission_service.dart';
 import 'dart:async';
@@ -13,11 +14,13 @@ class ChatMessage {
   final String text;
   final bool isUser;
   final bool isError;
+  final List<String> imageUrls;
 
   ChatMessage({
     required this.text,
     required this.isUser,
     this.isError = false,
+    this.imageUrls = const [],
   });
 }
 
@@ -30,6 +33,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String? pendingToolId;
   StreamSubscription<Map<String, dynamic>>? _messageSubscription;
+  
+  final ImagePicker _picker = ImagePicker();
+  List<String> _uploadedImageUrls = [];
+  bool _isUploading = false;
+  bool _isPickerActive = false;
 
   @override
   void initState() {
@@ -88,18 +96,107 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void sendMessage() {
-    if (controller.text.isEmpty) return;
+    if (controller.text.isEmpty && _uploadedImageUrls.isEmpty) return;
 
     String userMessage = controller.text;
     controller.clear();
-
+    
+    List<String> currentUrls = List.from(_uploadedImageUrls);
     setState(() {
-      messages.add(ChatMessage(text: userMessage, isUser: true));
+      messages.add(ChatMessage(
+        text: userMessage, 
+        isUser: true, 
+        imageUrls: currentUrls,
+      ));
+      _uploadedImageUrls.clear();
     });
 
     Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
 
-    api.sendChat(userMessage);
+    api.sendChat(userMessage, imageUrls: currentUrls);
+  }
+
+  Future<void> _pickImage() async {
+    if (_isPickerActive) return;
+    
+    if (_uploadedImageUrls.length >= 3) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("최대 3장까지만 업로드할 수 있습니다."))
+        );
+      }
+      return;
+    }
+    
+    setState(() {
+      _isPickerActive = true;
+    });
+
+    List<XFile> images = [];
+    try {
+      images = await _picker.pickMultiImage();
+    } catch (e) {
+      debugPrint("Image picker error: $e");
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isPickerActive = false;
+        });
+      }
+    }
+    
+    if (images.isEmpty) return;
+    
+    List<XFile> validImages = [];
+    for (var img in images) {
+      final bytes = await img.length();
+      if (bytes > 5 * 1024 * 1024) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("${img.name}은(는) 5MB를 초과하여 제외되었습니다."))
+          );
+        }
+      } else {
+        validImages.add(img);
+      }
+    }
+    
+    if (validImages.isEmpty) return;
+    
+    int remaining = 3 - _uploadedImageUrls.length;
+    if (validImages.length > remaining) {
+      validImages = validImages.sublist(0, remaining);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("최대 3장까지만 업로드되어 일부 이미지는 제외되었습니다."))
+        );
+      }
+    }
+    
+    setState(() {
+      _isUploading = true;
+    });
+    
+    try {
+      List<String> urls = await api.uploadImages(validImages);
+      if (mounted) {
+        setState(() {
+          _uploadedImageUrls.addAll(urls);
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("이미지 업로드 실패: $e"))
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploading = false;
+        });
+      }
+    }
   }
 
   void _handleApprove(bool approve) {
@@ -135,25 +232,58 @@ class _ChatScreenState extends State<ChatScreen> {
             bottomRight: Radius.circular(message.isUser ? 4 : 16),
           ),
         ),
-        child: message.isUser
-            ? Text(
-                message.text,
-                style: TextStyle(color: textColor, fontSize: 16),
-              )
-            : MarkdownBody(
-                data: message.text,
-                styleSheet: MarkdownStyleSheet(
-                  p: TextStyle(color: textColor, fontSize: 16),
-                  h1: TextStyle(color: textColor, fontSize: 20),
-                  h2: TextStyle(color: textColor, fontSize: 18),
-                  code: TextStyle(
-                    color: textColor,
-                    backgroundColor: Colors.black12,
-                    fontFamily: 'monospace',
-                  ),
-                ),
-                onTapLink: (text, href, title) {},
+        child: Column(
+          crossAxisAlignment: message.isUser 
+              ? CrossAxisAlignment.end 
+              : CrossAxisAlignment.start,
+          children: [
+            if (message.imageUrls.isNotEmpty)
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: message.imageUrls.map((url) {
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      url,
+                      width: 120,
+                      height: 120,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) =>
+                          Container(
+                        width: 120,
+                        height: 120,
+                        color: Colors.grey.shade300,
+                        child: const Icon(Icons.broken_image),
+                      ),
+                    ),
+                  );
+                }).toList(),
               ),
+            if (message.imageUrls.isNotEmpty && message.text.isNotEmpty)
+              const SizedBox(height: 8),
+            if (message.text.isNotEmpty)
+              message.isUser
+                  ? Text(
+                      message.text,
+                      style: TextStyle(color: textColor, fontSize: 16),
+                    )
+                  : MarkdownBody(
+                      data: message.text,
+                      styleSheet: MarkdownStyleSheet(
+                        p: TextStyle(color: textColor, fontSize: 16),
+                        h1: TextStyle(color: textColor, fontSize: 20),
+                        h2: TextStyle(color: textColor, fontSize: 18),
+                        code: TextStyle(
+                          color: textColor,
+                          backgroundColor: Colors.black12,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                      onTapLink: (text, href, title) {},
+                    ),
+          ],
+        ),
       ),
     );
   }
@@ -197,10 +327,73 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const Divider(height: 1),
+            if (_uploadedImageUrls.isNotEmpty || _isUploading)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(
+                  children: [
+                    ..._uploadedImageUrls.map((url) => Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            Container(
+                              margin: const EdgeInsets.only(right: 8),
+                              width: 60,
+                              height: 60,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(8),
+                                image: DecorationImage(
+                                  image: NetworkImage(url),
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              right: 4,
+                              top: -4,
+                              child: GestureDetector(
+                                onTap: () {
+                                  setState(() {
+                                    _uploadedImageUrls.remove(url);
+                                  });
+                                },
+                                child: const CircleAvatar(
+                                  radius: 10,
+                                  backgroundColor: Colors.black54,
+                                  child: Icon(Icons.close, size: 12, color: Colors.white),
+                                ),
+                              ),
+                            ),
+                          ],
+                        )),
+                    if (_isUploading)
+                      Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        width: 60,
+                        height: 60,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade300,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Center(
+                          child: SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
+                  IconButton(
+                    icon: const Icon(Icons.image),
+                    onPressed: _isUploading || _isPickerActive || _uploadedImageUrls.length >= 3 ? null : _pickImage,
+                  ),
+                  const SizedBox(width: 4),
                   Expanded(
                     child: TextField(
                       controller: controller,

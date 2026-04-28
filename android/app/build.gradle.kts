@@ -7,13 +7,13 @@ plugins {
 android {
     namespace = "com.meowryang.pet_agent"
 
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.meowryang.pet_agent"
 
         minSdk = flutter.minSdkVersion
-        targetSdk = 34
+        targetSdk = 36
 
         versionCode = 1
         versionName = "1.0"
