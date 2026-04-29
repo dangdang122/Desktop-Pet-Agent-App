@@ -11,15 +11,17 @@ class ChatScreen extends StatefulWidget {
 }
 
 class ChatMessage {
-  final String text;
+  String text;
   final bool isUser;
   final bool isError;
+  final bool isSystem;
   final List<String> imageUrls;
 
   ChatMessage({
     required this.text,
     required this.isUser,
     this.isError = false,
+    this.isSystem = false,
     this.imageUrls = const [],
   });
 }
@@ -33,6 +35,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String? pendingToolId;
   StreamSubscription<Map<String, dynamic>>? _messageSubscription;
+  
+  String _currentNode = ""; // 현재 실행 중인 노드 추적
   
   final ImagePicker _picker = ImagePicker();
   List<String> _uploadedImageUrls = [];
@@ -53,7 +57,11 @@ class _ChatScreenState extends State<ChatScreen> {
       
       if (status == "approval_required") {
         setState(() {
-          messages.add(ChatMessage(text: "승인 필요 → $message", isUser: false));
+          messages.add(ChatMessage(
+            text: "승인 필요 → $message", 
+            isUser: false,
+            isSystem: true,
+          ));
           pendingToolId = response["tool_call_id"];
         });
       } else if (status == "error") {
@@ -65,11 +73,46 @@ class _ChatScreenState extends State<ChatScreen> {
           ));
           pendingToolId = null;
         });
-      } else {
+      } else if (status == "tool_start") {
+        String toolName = response["tool_name"] ?? "";
         setState(() {
-          messages.add(ChatMessage(text: message ?? "", isUser: false));
-          pendingToolId = null;
+          if (messages.isEmpty || messages.last.isUser || messages.last.isSystem || messages.last.isError) {
+             messages.add(ChatMessage(text: "🛠 도구 사용 중: $toolName\n", isUser: false));
+          } else {
+             if (messages.last.text.isNotEmpty && !messages.last.text.endsWith("\n")) {
+               messages.last.text += "\n";
+             }
+             messages.last.text += "🛠 도구 사용 중: $toolName\n";
+          }
         });
+      } else if (status == "stream_chunk") {
+        // Planner, Worker 등의 중간 노드에서 발생하는 JSON 스트리밍 청크는 무시
+        if (_currentNode.toLowerCase() == "planner" || _currentNode.toLowerCase() == "worker") {
+          return;
+        }
+        
+        String chunk = response["chunk"] ?? "";
+        setState(() {
+          if (messages.isEmpty || messages.last.isUser || messages.last.isSystem || messages.last.isError) {
+            messages.add(ChatMessage(text: chunk, isUser: false));
+          } else {
+            messages.last.text += chunk;
+          }
+        });
+      } else if (status == "stream_end") {
+        // 스트림 종료 시 노드 초기화
+        _currentNode = "";
+      } else if (status == "node_start") {
+        // 실행 중인 노드명 업데이트
+        _currentNode = response["node"] ?? "";
+      } else {
+        // 기존 대비 (status가 없을 때 등)
+        if (message != null && message.isNotEmpty) {
+          setState(() {
+            messages.add(ChatMessage(text: message, isUser: false));
+            pendingToolId = null;
+          });
+        }
       }
       
       Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
@@ -211,7 +254,9 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildBubble(ChatMessage message) {
     final backgroundColor = message.isUser
         ? Colors.blueAccent
-        : (message.isError ? Colors.red.shade100 : Colors.grey.shade200);
+        : (message.isError 
+            ? Colors.red.shade100 
+            : (message.isSystem ? Colors.orange.shade100 : Colors.grey.shade200));
     final textColor = message.isUser ? Colors.white : Colors.black87;
 
     return Align(
