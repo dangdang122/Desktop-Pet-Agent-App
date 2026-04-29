@@ -53,7 +53,7 @@ class ApiService {
     _channel = null;
   }
 
-  void sendChat(String message, {List<String>? imageUrls}) {
+  void sendChat(String message, {List<String>? imageUrls, String? sessionId}) {
     if (_channel == null) connect();
 
     final Map<String, dynamic> requestBody = {
@@ -63,8 +63,10 @@ class ApiService {
     if (imageUrls != null && imageUrls.isNotEmpty) {
       requestBody["images"] = imageUrls;
     }
-    if (sessionId != null) {
-      requestBody["session_id"] = sessionId;
+    
+    final targetSessionId = sessionId ?? this.sessionId;
+    if (targetSessionId != null) {
+      requestBody["session_id"] = targetSessionId;
     }
 
     _channel?.sink.add(jsonEncode(requestBody));
@@ -99,17 +101,17 @@ class ApiService {
     }
   }
 
-  void approveTool(bool approve, String toolCallId) {
+  void approveTool(bool approve, String toolCallId, {String? sessionId}) {
     if (_channel == null) connect();
 
     final Map<String, dynamic> requestBody = {
       "action": "approve",
       "approve": approve,
-      // 백엔드는 session_id로 상태를 재개하므로 tool_call_id는 필수가 아닐 수 있으나
-      // 일관성을 위해 포함하거나 제외해도 무방합니다.
     };
-    if (sessionId != null) {
-      requestBody["session_id"] = sessionId;
+    
+    final targetSessionId = sessionId ?? this.sessionId;
+    if (targetSessionId != null) {
+      requestBody["session_id"] = targetSessionId;
     }
 
     _channel?.sink.add(jsonEncode(requestBody));

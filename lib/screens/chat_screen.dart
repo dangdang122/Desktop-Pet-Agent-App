@@ -26,12 +26,32 @@ class ChatMessage {
   });
 }
 
+class ChatSession {
+  final String id;
+  List<ChatMessage> messages;
+
+  ChatSession({
+    required this.id,
+    List<ChatMessage>? messages,
+  }) : messages = messages ?? [];
+}
+
 class _ChatScreenState extends State<ChatScreen> {
   final ApiService api = ApiService();
 
   final TextEditingController controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  List<ChatMessage> messages = [];
+  
+  // 다중 세션 지원 구조
+  Map<String, ChatSession> sessions = {};
+  String? currentSessionId;
+
+  List<ChatMessage> get messages {
+    if (currentSessionId == null || !sessions.containsKey(currentSessionId)) {
+      return [];
+    }
+    return sessions[currentSessionId!]!.messages;
+  }
 
   String? pendingToolId;
   StreamSubscription<Map<String, dynamic>>? _messageSubscription;
@@ -46,14 +66,31 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _createNewSession();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       requestPermissions();
     });
 
     api.connect();
     _messageSubscription = api.messages.listen((response) {
+      String? sessionId = response["session_id"];
       String? status = response["status"];
       String? message = response["message"];
+      
+      // 응답된 sessionId가 있고, 아직 세션 맵에 없다면 세션 구조에 반영
+      if (sessionId != null) {
+        if (!sessions.containsKey(sessionId)) {
+          setState(() {
+            sessions[sessionId] = ChatSession(id: sessionId);
+          });
+        }
+        // 만약 현재 세션이 없으면 응답된 sessionId로 설정
+        if (currentSessionId == null) {
+          setState(() {
+            currentSessionId = sessionId;
+          });
+        }
+      }
       
       if (status == "approval_required") {
         setState(() {
@@ -156,7 +193,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
     Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
 
-    api.sendChat(userMessage, imageUrls: currentUrls);
+    api.sendChat(userMessage, imageUrls: currentUrls, sessionId: currentSessionId);
+  }
+
+  void _createNewSession() {
+    String newId = "session_${DateTime.now().millisecondsSinceEpoch}";
+    setState(() {
+      sessions[newId] = ChatSession(id: newId);
+      currentSessionId = newId;
+    });
   }
 
   Future<void> _pickImage() async {
@@ -245,7 +290,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _handleApprove(bool approve) {
     if (pendingToolId == null) return;
 
-    api.approveTool(approve, pendingToolId!);
+    api.approveTool(approve, pendingToolId!, sessionId: currentSessionId);
     setState(() {
       pendingToolId = null;
     });
