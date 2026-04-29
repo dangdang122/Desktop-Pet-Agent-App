@@ -28,10 +28,12 @@ class ChatMessage {
 
 class ChatSession {
   final String id;
+  String title;
   List<ChatMessage> messages;
 
   ChatSession({
     required this.id,
+    this.title = "새 대화",
     List<ChatMessage>? messages,
   }) : messages = messages ?? [];
 }
@@ -57,6 +59,7 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<Map<String, dynamic>>? _messageSubscription;
   
   String _currentNode = ""; // 현재 실행 중인 노드 추적
+  String _searchQuery = ""; // 세션 검색용 상태
   
   final ImagePicker _picker = ImagePicker();
   List<String> _uploadedImageUrls = [];
@@ -189,6 +192,13 @@ class _ChatScreenState extends State<ChatScreen> {
         imageUrls: currentUrls,
       ));
       _uploadedImageUrls.clear();
+
+      // 세션 제목이 기본값이면 첫 번째 사용자 메시지로 자동 지정
+      if (currentSessionId != null && sessions[currentSessionId!]!.title == "새 대화") {
+        sessions[currentSessionId!]!.title = userMessage.length > 20
+            ? "${userMessage.substring(0, 20)}..."
+            : userMessage;
+      }
     });
 
     Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
@@ -202,6 +212,14 @@ class _ChatScreenState extends State<ChatScreen> {
       sessions[newId] = ChatSession(id: newId);
       currentSessionId = newId;
     });
+  }
+
+  void _switchToSession(String sessionId) {
+    setState(() {
+      currentSessionId = sessionId;
+    });
+    // 대화창 하단으로 스크롤 이동
+    Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
   }
 
   Future<void> _pickImage() async {
@@ -378,19 +396,103 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildDrawer(List<ChatSession> reversedSessions) {
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text("Flippy chats", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  IconButton(
+                    icon: const Icon(Icons.add_circle_outline),
+                    onPressed: () {
+                      _createNewSession();
+                      Navigator.of(context).pop();
+                    },
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              child: TextField(
+                decoration: InputDecoration(
+                  hintText: "Search",
+                  suffixIcon: const Icon(Icons.search),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(20),
+                    borderSide: BorderSide.none,
+                  ),
+                  filled: true,
+                  fillColor: Colors.grey.shade200,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 0),
+                ),
+                onChanged: (value) {
+                  setState(() {
+                    _searchQuery = value;
+                  });
+                },
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              child: Text("Chats", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+            ),
+            Expanded(
+              child: ListView.builder(
+                itemCount: reversedSessions.length,
+                itemBuilder: (context, index) {
+                  final session = reversedSessions[index];
+                  final isSelected = session.id == currentSessionId;
+                  return Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: isSelected ? Colors.grey.shade200 : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: ListTile(
+                      title: Text(session.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      onTap: () {
+                        _switchToSession(session.id);
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                  );
+                },
+              ),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: CircleAvatar(
+                backgroundColor: Colors.grey.shade300,
+                child: const Icon(Icons.person, color: Colors.white),
+              ),
+              title: const Text("polytech@kopo.ac.kr", style: TextStyle(fontSize: 14)),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final filteredSessions = sessions.values.where((s) {
+      return s.title.toLowerCase().contains(_searchQuery.toLowerCase());
+    }).toList();
+    final reversedSessions = filteredSessions.reversed.toList();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text("AI Agent"),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.add_comment),
-            tooltip: "새 대화 시작",
-            onPressed: _createNewSession,
-          ),
-        ],
       ),
+      drawer: _buildDrawer(reversedSessions),
       body: SafeArea(
         child: Column(
           children: [
