@@ -383,6 +383,13 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text("AI Agent"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add_comment),
+            tooltip: "새 대화 시작",
+            onPressed: _createNewSession,
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
