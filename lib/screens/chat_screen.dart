@@ -30,11 +30,13 @@ class ChatSession {
   final String id;
   String title;
   List<ChatMessage> messages;
+  String currentNode; // 각 세션별 실행 노드 추적
 
   ChatSession({
     required this.id,
     this.title = "새 대화",
     List<ChatMessage>? messages,
+    this.currentNode = "",
   }) : messages = messages ?? [];
 }
 
@@ -58,7 +60,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String? pendingToolId;
   StreamSubscription<Map<String, dynamic>>? _messageSubscription;
 
-  String _currentNode = ""; // 현재 실행 중인 노드 추적
+
   String _searchQuery = ""; // 세션 검색용 상태
 
   final ImagePicker _picker = ImagePicker();
@@ -69,35 +71,51 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _createNewSession();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      requestPermissions();
-    });
-
     api.connect();
     _messageSubscription = api.messages.listen((response) {
       String? sessionId = response["session_id"];
       String? status = response["status"];
       String? message = response["message"];
 
+      if (sessionId == null) return;
+
       // 응답된 sessionId가 있고, 아직 세션 맵에 없다면 세션 구조에 반영
-      if (sessionId != null) {
-        if (!sessions.containsKey(sessionId)) {
-          setState(() {
-            sessions[sessionId] = ChatSession(id: sessionId);
-          });
-        }
-        // 만약 현재 세션이 없으면 응답된 sessionId로 설정
-        if (currentSessionId == null) {
-          setState(() {
-            currentSessionId = sessionId;
-          });
-        }
+      if (!sessions.containsKey(sessionId)) {
+        setState(() {
+          sessions[sessionId] = ChatSession(id: sessionId);
+        });
+      }
+      
+      // 만약 현재 세션이 없으면 응답된 sessionId로 설정
+      if (currentSessionId == null) {
+        setState(() {
+          currentSessionId = sessionId;
+        });
       }
 
-      if (status == "approval_required") {
+      final ChatSession targetSession = sessions[sessionId]!;
+      final List<ChatMessage> targetMessages = targetSession.messages;
+
+      if (status == "chat_message") {
         setState(() {
-          messages.add(
+          targetMessages.add(
+            ChatMessage(
+              text: message ?? "",
+              isUser: true,
+              imageUrls: List<String>.from(response["images"] ?? []),
+            ),
+          );
+        });
+      } else if (status == "session_deleted") {
+        setState(() {
+          sessions.remove(sessionId);
+          if (currentSessionId == sessionId) {
+            currentSessionId = sessions.isNotEmpty ? sessions.keys.last : null;
+          }
+        });
+      } else if (status == "approval_required") {
+        setState(() {
+          targetMessages.add(
             ChatMessage(
               text: "승인 필요 → $message",
               isUser: false,
@@ -108,7 +126,7 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       } else if (status == "error") {
         setState(() {
-          messages.add(
+          targetMessages.add(
             ChatMessage(text: "오류: $message", isUser: false, isError: true),
           );
           pendingToolId = null;
@@ -116,56 +134,64 @@ class _ChatScreenState extends State<ChatScreen> {
       } else if (status == "tool_start") {
         String toolName = response["tool_name"] ?? "";
         setState(() {
-          if (messages.isEmpty ||
-              messages.last.isUser ||
-              messages.last.isSystem ||
-              messages.last.isError) {
-            messages.add(
+          if (targetMessages.isEmpty ||
+              targetMessages.last.isUser ||
+              targetMessages.last.isSystem ||
+              targetMessages.last.isError) {
+            targetMessages.add(
               ChatMessage(text: "🛠 도구 사용 중: $toolName\n", isUser: false),
             );
           } else {
-            if (messages.last.text.isNotEmpty &&
-                !messages.last.text.endsWith("\n")) {
-              messages.last.text += "\n";
+            if (targetMessages.last.text.isNotEmpty &&
+                !targetMessages.last.text.endsWith("\n")) {
+              targetMessages.last.text += "\n";
             }
-            messages.last.text += "🛠 도구 사용 중: $toolName\n";
+            targetMessages.last.text += "🛠 도구 사용 중: $toolName\n";
           }
         });
       } else if (status == "stream_chunk") {
         // Planner, Worker 등의 중간 노드에서 발생하는 JSON 스트리밍 청크는 무시
-        if (_currentNode.toLowerCase() == "planner" ||
-            _currentNode.toLowerCase() == "worker") {
+        final node = targetSession.currentNode.toLowerCase();
+        if (node == "planner" || node == "worker") {
           return;
         }
 
         String chunk = response["chunk"] ?? "";
         setState(() {
-          if (messages.isEmpty ||
-              messages.last.isUser ||
-              messages.last.isSystem ||
-              messages.last.isError) {
-            messages.add(ChatMessage(text: chunk, isUser: false));
+          if (targetMessages.isEmpty ||
+              targetMessages.last.isUser ||
+              targetMessages.last.isSystem ||
+              targetMessages.last.isError) {
+            targetMessages.add(ChatMessage(text: chunk, isUser: false));
           } else {
-            messages.last.text += chunk;
+            targetMessages.last.text += chunk;
           }
         });
       } else if (status == "stream_end") {
-        // 스트림 종료 시 노드 초기화
-        _currentNode = "";
+        setState(() {
+          targetSession.currentNode = "";
+        });
       } else if (status == "node_start") {
-        // 실행 중인 노드명 업데이트
-        _currentNode = response["node"] ?? "";
+        setState(() {
+          targetSession.currentNode = response["node"] ?? "";
+        });
       } else {
-        // 기존 대비 (status가 없을 때 등)
         if (message != null && message.isNotEmpty) {
           setState(() {
-            messages.add(ChatMessage(text: message, isUser: false));
+            targetMessages.add(ChatMessage(text: message, isUser: false));
             pendingToolId = null;
           });
         }
       }
 
-      Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
+      if (sessionId == currentSessionId) {
+        Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
+      }
+    });
+
+    _createNewSession();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      requestPermissions();
     });
   }
 
@@ -220,17 +246,21 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _createNewSession() {
-    String newId = "session_${DateTime.now().millisecondsSinceEpoch}";
+    String newId = api.generateUuidV4();
     setState(() {
       sessions[newId] = ChatSession(id: newId);
       currentSessionId = newId;
     });
+    api.createSession(newId);
   }
 
   void _switchToSession(String sessionId) {
     setState(() {
       currentSessionId = sessionId;
     });
+    // 서버에 대화 이력 요청 (동기화)
+    api.getHistory(sessionId);
+    
     // 대화창 하단으로 스크롤 이동
     Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
   }
@@ -289,11 +319,14 @@ class _ChatScreenState extends State<ChatScreen> {
                 setState(() {
                   sessions.remove(sessionId);
                 });
+                api.deleteSession(sessionId);
+                
                 if (currentSessionId == sessionId) {
                   if (sessions.isNotEmpty) {
                     setState(() {
                       currentSessionId = sessions.keys.last;
                     });
+                    api.getHistory(currentSessionId!);
                   } else {
                     _createNewSession();
                   }
