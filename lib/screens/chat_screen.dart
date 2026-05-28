@@ -189,7 +189,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
 
-    _createNewSession();
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       requestPermissions();
     });
@@ -328,7 +328,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     });
                     api.getHistory(currentSessionId!);
                   } else {
-                    _createNewSession();
+                    setState(() {
+                      currentSessionId = null;
+                    });
                   }
                 }
                 Navigator.pop(context);
@@ -654,6 +656,183 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildIntroScreen() {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 32.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Container(
+              width: 100,
+              height: 100,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  colors: [Colors.blueAccent, Colors.purpleAccent.shade100],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.blueAccent.withValues(alpha: 0.3),
+                    blurRadius: 20,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
+              ),
+              child: const Icon(
+                Icons.smart_toy_outlined,
+                size: 54,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 32),
+            const Text(
+              "AI Desktop Pet Agent",
+              style: TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+                letterSpacing: -0.5,
+                color: Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              "스마트한 에이전트와 함께 데스크톱 업무를 자동화하고\n자유롭게 대화를 나누어 보세요.",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 15,
+                color: Colors.grey.shade600,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 40),
+            _buildFeatureCard(
+              icon: Icons.auto_awesome,
+              title: "데스크톱 자동 제어",
+              description: "마우스 제어, 파일 관리, 시스템 명령 수행 등 다양한 도구를 사용합니다.",
+            ),
+            const SizedBox(height: 12),
+            _buildFeatureCard(
+              icon: Icons.image_search,
+              title: "멀티모달 이미지 분석",
+              description: "화면 캡처나 이미지를 업로드하여 에이전트에게 상황을 설명할 수 있습니다.",
+            ),
+            const SizedBox(height: 12),
+            _buildFeatureCard(
+              icon: Icons.security,
+              title: "안전한 승인 기반 동작",
+              description: "중요한 도구 실행 시 사용자의 승인을 거쳐 안전하게 실행됩니다.",
+            ),
+            const SizedBox(height: 48),
+            Container(
+              width: double.infinity,
+              height: 56,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(28),
+                gradient: const LinearGradient(
+                  colors: [Colors.blueAccent, Colors.purpleAccent],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.blueAccent.withValues(alpha: 0.35),
+                    blurRadius: 15,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(28),
+                  ),
+                ),
+                onPressed: _createNewSession,
+                icon: const Icon(Icons.add, color: Colors.white, size: 24),
+                label: const Text(
+                  "새 대화 시작하기",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFeatureCard({
+    required IconData icon,
+    required String title,
+    required String description,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade100, width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.02),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.blueAccent.withValues(alpha: 0.08),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              icon,
+              color: Colors.blueAccent,
+              size: 24,
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  description,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey.shade600,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final filteredSessions = sessions.values.where((s) {
@@ -665,151 +844,151 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(title: const Text("AI Agent")),
       drawer: _buildDrawer(reversedSessions),
       body: SafeArea(
-        child: Column(
-          children: [
-            if (pendingToolId != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    ElevatedButton(
-                      onPressed: () => _handleApprove(true),
-                      child: const Text("Approve"),
-                    ),
-                    const SizedBox(width: 10),
-                    ElevatedButton(
-                      onPressed: () => _handleApprove(false),
-                      child: const Text("Reject"),
-                    ),
-                  ],
-                ),
-              ),
-            Expanded(
-              child: ListView.builder(
-                controller: _scrollController,
-                itemCount: messages.length,
-                padding: const EdgeInsets.only(top: 12, bottom: 12),
-                itemBuilder: (context, index) {
-                  return _buildBubble(messages[index]);
-                },
-              ),
-            ),
-            const Divider(height: 1),
-            if (_uploadedImageUrls.isNotEmpty || _isUploading)
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                child: Row(
-                  children: [
-                    ..._uploadedImageUrls.map(
-                      (url) => Stack(
-                        clipBehavior: Clip.none,
+        child: currentSessionId == null
+            ? _buildIntroScreen()
+            : Column(
+                children: [
+                  if (pendingToolId != null)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Container(
-                            margin: const EdgeInsets.only(right: 8),
-                            width: 60,
-                            height: 60,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(8),
-                              image: DecorationImage(
-                                image: NetworkImage(url),
-                                fit: BoxFit.cover,
-                              ),
-                            ),
+                          ElevatedButton(
+                            onPressed: () => _handleApprove(true),
+                            child: const Text("Approve"),
                           ),
-                          Positioned(
-                            right: 4,
-                            top: -4,
-                            child: GestureDetector(
-                              onTap: () {
-                                setState(() {
-                                  _uploadedImageUrls.remove(url);
-                                });
-                              },
-                              child: const CircleAvatar(
-                                radius: 10,
-                                backgroundColor: Colors.black54,
-                                child: Icon(
-                                  Icons.close,
-                                  size: 12,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ),
+                          const SizedBox(width: 10),
+                          ElevatedButton(
+                            onPressed: () => _handleApprove(false),
+                            child: const Text("Reject"),
                           ),
                         ],
                       ),
                     ),
-                    if (_isUploading)
-                      Container(
-                        margin: const EdgeInsets.only(right: 8),
-                        width: 60,
-                        height: 60,
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade300,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: const Center(
-                          child: SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.image),
-                    onPressed:
-                        _isUploading ||
-                            _isPickerActive ||
-                            _uploadedImageUrls.length >= 3
-                        ? null
-                        : _pickImage,
-                  ),
-                  const SizedBox(width: 4),
                   Expanded(
-                    child: TextField(
-                      controller: controller,
-                      decoration: InputDecoration(
-                        hintText: "메시지 입력",
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                      ),
+                    child: ListView.builder(
+                      controller: _scrollController,
+                      itemCount: messages.length,
+                      padding: const EdgeInsets.only(top: 12, bottom: 12),
+                      itemBuilder: (context, index) {
+                        return _buildBubble(messages[index]);
+                      },
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  CircleAvatar(
-                    radius: 24,
-                    backgroundColor: Theme.of(context).colorScheme.primary,
-                    child: IconButton(
-                      color: Colors.white,
-                      icon: const Icon(Icons.send),
-                      onPressed: sendMessage,
+                  const Divider(height: 1),
+                  if (_uploadedImageUrls.isNotEmpty || _isUploading)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        children: [
+                          ..._uploadedImageUrls.map(
+                            (url) => Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                Container(
+                                  margin: const EdgeInsets.only(right: 8),
+                                  width: 60,
+                                  height: 60,
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(8),
+                                    image: DecorationImage(
+                                      image: NetworkImage(url),
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  right: 4,
+                                  top: -4,
+                                  child: GestureDetector(
+                                    onTap: () {
+                                      setState(() {
+                                        _uploadedImageUrls.remove(url);
+                                      });
+                                    },
+                                    child: const CircleAvatar(
+                                      radius: 10,
+                                      backgroundColor: Colors.black54,
+                                      child: Icon(
+                                        Icons.close,
+                                        size: 12,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (_isUploading)
+                            Container(
+                              margin: const EdgeInsets.only(right: 8),
+                              width: 60,
+                              height: 60,
+                              decoration: BoxDecoration(
+                                color: Colors.grey.shade300,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Center(
+                                child: SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: Row(
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.image),
+                          onPressed:
+                              _isUploading ||
+                                  _isPickerActive ||
+                                  _uploadedImageUrls.length >= 3
+                              ? null
+                              : _pickImage,
+                        ),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: TextField(
+                            controller: controller,
+                            decoration: InputDecoration(
+                              hintText: "메시지 입력",
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 12),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        CircleAvatar(
+                          radius: 24,
+                          backgroundColor: Theme.of(context).colorScheme.primary,
+                          child: IconButton(
+                            color: Colors.white,
+                            icon: const Icon(Icons.send),
+                            onPressed: sendMessage,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
