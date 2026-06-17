@@ -1,8 +1,15 @@
 import 'package:flutter/material.dart';
-import 'screens/chat_screen.dart';
+import 'screens/login_screen.dart';
+import 'services/api_service.dart';
+import 'services/device_service.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // 기기 정보 및 이전 로그인 세션 로드
+  await DeviceService().init();
+  await ApiService().loadCredentials();
+
   runApp(const AgentApp());
 }
 
@@ -14,7 +21,7 @@ class AgentApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'AI Agent',
-      home: ChatScreen(),
+      home: const LoginScreen(),
     );
   }
 }

@@ -4,29 +4,35 @@ import 'dart:math';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
+  static final ApiService _instance = ApiService._internal();
+  factory ApiService() => _instance;
+  ApiService._internal();
+
   // ==========================================
   // [설정 값] 게이트웨이 및 에이전트 연동 정보
   // ==========================================
   // TODO: 개발 환경에 따라 아래의 설정을 알맞게 수정해주세요.
   final String gatewayHost = "https://petagent.aikopo.net"; // 게이트웨이 서버 IP 및 포트
-  final String userId = "00000000-0000-0000-0000-000000000000"; // 사용자 고유 ID (Agent의 USER_ID와 일치해야 함)
+  String userId = ""; // 사용자 고유 ID (로그인 시 동적 업데이트)
   final String targetAgentId = "DESKTOP-NMCL2T9-1"; // 제어 대상 Agent의 고유 ID (PC이름-1)
 
   final String baseUrl = "https://petagent.aikopo.net"; // 기존 이미지 업로드 API 서버 주소
+  String? token;
+  String? email;
   
   String get wsUrl {
     final host = gatewayHost.trim();
-    if (host.startsWith("http://")) {
-      return "${host.replaceFirst("http://", "ws://")}/ws/$userId";
-    } else if (host.startsWith("https://")) {
-      return "${host.replaceFirst("https://", "wss://")}/ws/$userId";
-    } else if (host.startsWith("ws://") || host.startsWith("wss://")) {
-      return "$host/ws/$userId";
-    } else {
-      return "ws://$host/ws/$userId";
-    }
+    final urlBase = host.startsWith("http://")
+        ? host.replaceFirst("http://", "ws://")
+        : host.startsWith("https://")
+            ? host.replaceFirst("https://", "wss://")
+            : host.startsWith("ws://") || host.startsWith("wss://")
+                ? host
+                : "ws://$host";
+    return "$urlBase/ws?token=${token ?? ''}";
   }
   
   String? sessionId;
@@ -71,6 +77,7 @@ class ApiService {
         "role": "app",
         "client_id": "flutter_app_${generateUuidV4()}",
         "timestamp": DateTime.now().toUtc().toIso8601String(),
+        if (token != null) "token": token,
       }
     };
     _channel!.sink.add(jsonEncode(regMessage));
@@ -159,10 +166,26 @@ class ApiService {
             mappedData["status"] = "chat_message";
             mappedData["message"] = rawPayload["message"] ?? "";
             mappedData["images"] = List<String>.from(rawPayload["images"] ?? []);
+          } else if (type == "session_sync") {
+            mappedData["status"] = "session_sync";
+            mappedData["sessions"] = rawPayload["sessions"];
           } else if (type == "session_deleted") {
             mappedData["status"] = "session_deleted";
+            mappedData["session_id"] = rawPayload["session_id"];
+            mappedData["device_id"] = rawPayload["device_id"];
           } else if (type == "session_created") {
             mappedData["status"] = "session_created";
+            mappedData["session_id"] = rawPayload["session_id"];
+            mappedData["device_id"] = rawPayload["device_id"];
+            mappedData["title"] = rawPayload["title"];
+          } else if (type == "session_update") {
+            mappedData["status"] = "session_update";
+            mappedData["session_id"] = rawPayload["session_id"];
+            mappedData["device_id"] = rawPayload["device_id"];
+            mappedData["title"] = rawPayload["title"];
+          } else if (type == "status") {
+            mappedData["status"] = "agent_status";
+            mappedData["agent_status"] = rawPayload["status"]; // "busy" or "ready"
           } else {
             // 그 외 처리되지 않은 타입은 스킵
             return;
@@ -270,42 +293,323 @@ class ApiService {
     _channel?.sink.add(jsonEncode(approveMessage));
   }
 
-  void getHistory(String sessionId) {
+  void getHistory(String sessionId, {String? deviceId}) {
     if (_channel == null) connect();
 
     final Map<String, dynamic> msg = {
       "type": "get_history",
       "payload": {
         "session_id": sessionId,
+        if (deviceId != null) "device_id": deviceId,
         "timestamp": DateTime.now().toUtc().toIso8601String(),
       }
     };
     _channel?.sink.add(jsonEncode(msg));
   }
 
-  void createSession(String sessionId) {
+  void createSession(String sessionId, {String? deviceId}) {
     if (_channel == null) connect();
 
     final Map<String, dynamic> msg = {
       "type": "session_created",
       "payload": {
         "session_id": sessionId,
+        if (deviceId != null) "device_id": deviceId,
         "timestamp": DateTime.now().toUtc().toIso8601String(),
       }
     };
     _channel?.sink.add(jsonEncode(msg));
   }
 
-  void deleteSession(String sessionId) {
+  void deleteSession(String sessionId, {String? deviceId}) {
     if (_channel == null) connect();
 
     final Map<String, dynamic> msg = {
       "type": "session_deleted",
       "payload": {
         "session_id": sessionId,
+        if (deviceId != null) "device_id": deviceId,
         "timestamp": DateTime.now().toUtc().toIso8601String(),
       }
     };
     _channel?.sink.add(jsonEncode(msg));
+  }
+
+  void updateSessionTitle(String sessionId, String title, {String? deviceId}) {
+    if (_channel == null) connect();
+
+    final Map<String, dynamic> msg = {
+      "type": "session_update",
+      "payload": {
+        "session_id": sessionId,
+        "title": title,
+        "message_id": generateUuidV4(),
+        if (deviceId != null) "device_id": deviceId,
+        "timestamp": DateTime.now().toUtc().toIso8601String(),
+      }
+    };
+    _channel?.sink.add(jsonEncode(msg));
+  }
+
+  // ==========================================
+  // [인증 관련 HTTP API 추가]
+  // ==========================================
+
+  Map<String, dynamic> _decodeJwt(String token) {
+    try {
+      final parts = token.split('.');
+      if (parts.length < 2) {
+        throw Exception('Invalid JWT format');
+      }
+      final payload = parts[1];
+      var normalized = base64Url.normalize(payload);
+      final decodedBytes = base64Url.decode(normalized);
+      final decodedString = utf8.decode(decodedBytes);
+      return jsonDecode(decodedString);
+    } catch (e) {
+      throw Exception('Failed to decode authentication token: $e');
+    }
+  }
+
+  Future<Map<String, dynamic>> signUp({
+    required String name,
+    required String email,
+    required String password,
+    required String deviceId,
+    required String deviceType,
+    required String deviceName,
+  }) async {
+    final response = await http.post(
+      Uri.parse("$baseUrl/api/auth/signup"),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({
+        "name": name,
+        "email": email,
+        "password": password,
+        "device_id": deviceId,
+        "device_type": deviceType.toLowerCase(), // 기본값 "pc", 소문자로 통일
+        "device_name": deviceName,
+      }),
+    );
+
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      final data = jsonDecode(response.body);
+      final String? receivedToken = data["access_token"];
+      if (receivedToken != null) {
+        token = receivedToken;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString("auth_token", receivedToken);
+        await prefs.setString("user_email", email);
+        this.email = email;
+        
+        // JWT 디코딩하여 user_id 추출
+        final decoded = _decodeJwt(receivedToken);
+        final String? decodedUserId = decoded["user_id"] ?? decoded["sub"] ?? decoded["id"];
+        if (decodedUserId != null) {
+          userId = decodedUserId;
+          await prefs.setString("user_id", decodedUserId);
+        }
+      }
+
+      // Sync signup with local python agent
+      try {
+        await http.post(
+          Uri.parse("http://localhost:8001/api/signup"),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({
+            "email": email,
+            "password": password,
+            "name": name,
+          }),
+        ).timeout(const Duration(seconds: 2));
+      } catch (e) {
+        print("Failed to sync signup with local agent: $e");
+      }
+
+      return data;
+    } else {
+      final responseBody = jsonDecode(response.body);
+      throw Exception(responseBody["detail"] ?? "회원가입에 실패했습니다.");
+    }
+  }
+
+  Future<Map<String, dynamic>> login({
+    required String email,
+    required String password,
+    required String deviceId,
+    required String deviceType,
+    required String deviceName,
+  }) async {
+    final response = await http.post(
+      Uri.parse("$baseUrl/api/auth/login"),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({
+        "email": email,
+        "password": password,
+        "device_id": deviceId,
+        "device_type": deviceType.toLowerCase(),
+        "device_name": deviceName,
+      }),
+    );
+
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      final data = jsonDecode(response.body);
+      final String? receivedToken = data["access_token"];
+      
+      if (receivedToken != null) {
+        token = receivedToken;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString("auth_token", receivedToken);
+        await prefs.setString("user_email", email);
+        this.email = email;
+        
+        // JWT 디코딩하여 user_id 추출
+        final decoded = _decodeJwt(receivedToken);
+        final String? decodedUserId = decoded["user_id"] ?? decoded["sub"] ?? decoded["id"];
+        if (decodedUserId != null) {
+          userId = decodedUserId;
+          await prefs.setString("user_id", decodedUserId);
+        }
+      }
+
+      // Sync login with local python agent
+      try {
+        await http.post(
+          Uri.parse("http://localhost:8001/api/login"),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({
+            "email": email,
+            "password": password,
+          }),
+        ).timeout(const Duration(seconds: 2));
+      } catch (e) {
+        print("Failed to sync login with local agent: $e");
+      }
+
+      return data;
+    } else {
+      final responseBody = jsonDecode(response.body);
+      throw Exception(responseBody["detail"] ?? "로그인에 실패했습니다.");
+    }
+  }
+
+  Future<void> loadCredentials() async {
+    final prefs = await SharedPreferences.getInstance();
+    final storedUserId = prefs.getString("user_id");
+    final storedToken = prefs.getString("auth_token");
+    final storedEmail = prefs.getString("user_email");
+    if (storedUserId != null) {
+      userId = storedUserId;
+    }
+    if (storedToken != null) {
+      token = storedToken;
+    }
+    if (storedEmail != null) {
+      email = storedEmail;
+    }
+  }
+
+  Future<void> logout() async {
+    disconnect();
+    token = null;
+    email = null;
+    userId = "";
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove("user_id");
+    await prefs.remove("auth_token");
+    await prefs.remove("user_email");
+
+    // Sync logout with local python agent
+    try {
+      await http.post(
+        Uri.parse("http://localhost:8001/api/logout"),
+      ).timeout(const Duration(seconds: 2));
+    } catch (e) {
+      print("Failed to sync logout with local agent: $e");
+    }
+  }
+
+  // ==========================================
+  // [기기 제어 & 세션 관련 신규 HTTP & WS API]
+  // ==========================================
+
+  Future<List<Map<String, dynamic>>> getDevices() async {
+    final response = await http.get(
+      Uri.parse("$baseUrl/api/devices"),
+      headers: {
+        "Authorization": "Bearer $token",
+        "Content-Type": "application/json",
+      },
+    );
+    if (response.statusCode == 200) {
+      final dynamic data = jsonDecode(response.body);
+      if (data is List) {
+        return List<Map<String, dynamic>>.from(data);
+      }
+      return [];
+    } else {
+      final responseBody = jsonDecode(response.body);
+      throw Exception(responseBody["detail"] ?? "기기 목록을 불러오는데 실패했습니다.");
+    }
+  }
+
+  Future<void> updateDeviceName(String deviceId, String newName) async {
+    final response = await http.patch(
+      Uri.parse("$baseUrl/api/devices/$deviceId"),
+      headers: {
+        "Authorization": "Bearer $token",
+        "Content-Type": "application/json",
+      },
+      body: jsonEncode({"device_name": newName}),
+    );
+    if (response.statusCode != 200 && response.statusCode != 204) {
+      final responseBody = jsonDecode(response.body);
+      throw Exception(responseBody["detail"] ?? "기기 이름 변경에 실패했습니다.");
+    }
+  }
+
+  Future<void> deleteDevice(String deviceId) async {
+    final response = await http.delete(
+      Uri.parse("$baseUrl/api/devices/$deviceId"),
+      headers: {
+        "Authorization": "Bearer $token",
+        "Content-Type": "application/json",
+      },
+    );
+    if (response.statusCode != 200 && response.statusCode != 204) {
+      final responseBody = jsonDecode(response.body);
+      throw Exception(responseBody["detail"] ?? "기기 제거에 실패했습니다.");
+    }
+  }
+
+  Future<Map<String, dynamic>> getHistoryHttp(String sessionId, {String? deviceId}) async {
+    var url = "$baseUrl/api/history/$sessionId";
+    if (deviceId != null) {
+      url += "?device_id=$deviceId";
+    }
+    final response = await http.get(
+      Uri.parse(url),
+      headers: {
+        "Authorization": "Bearer $token",
+        "Content-Type": "application/json",
+      },
+    );
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      final responseBody = jsonDecode(response.body);
+      throw Exception(responseBody["detail"] ?? "대화 이력을 불러오는데 실패했습니다.");
+    }
+  }
+
+  void sendStop(String sessionId) {
+    if (_channel == null) connect();
+    final Map<String, dynamic> stopMsg = {
+      "type": "stop",
+      "payload": {
+        "session_id": sessionId,
+      }
+    };
+    _channel?.sink.add(jsonEncode(stopMsg));
   }
 }

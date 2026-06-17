@@ -4,8 +4,11 @@ import 'package:image_picker/image_picker.dart';
 import '../services/api_service.dart';
 import '../services/permission_service.dart';
 import 'dart:async';
+import 'login_screen.dart';
 
 class ChatScreen extends StatefulWidget {
+  const ChatScreen({super.key});
+
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
@@ -28,12 +31,14 @@ class ChatMessage {
 
 class ChatSession {
   final String id;
+  String deviceId; // 각 세션이 소속된 기기 고유 ID
   String title;
   List<ChatMessage> messages;
   String currentNode; // 각 세션별 실행 노드 추적
 
   ChatSession({
     required this.id,
+    required this.deviceId,
     this.title = "새 대화",
     List<ChatMessage>? messages,
     this.currentNode = "",
@@ -45,10 +50,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   final TextEditingController controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   // 다중 세션 지원 구조
   Map<String, ChatSession> sessions = {};
   String? currentSessionId;
+  String? selectedDeviceId;
 
   List<ChatMessage> get messages {
     if (currentSessionId == null || !sessions.containsKey(currentSessionId)) {
@@ -64,25 +71,143 @@ class _ChatScreenState extends State<ChatScreen> {
   String _searchQuery = ""; // 세션 검색용 상태
 
   final ImagePicker _picker = ImagePicker();
-  List<String> _uploadedImageUrls = [];
-  bool _isUploading = false;
+  final List<String> _uploadedImageUrls = [];
   bool _isPickerActive = false;
+  bool _isUploading = false;
+
+  List<Map<String, dynamic>> devices = [];
+  bool _isLoadingDevices = false;
+
+  List<Map<String, dynamic>> get filteredDevices {
+    return devices.where((device) {
+      final name = device["device_name"] ?? "";
+      return name.toLowerCase().contains(_searchQuery.toLowerCase());
+    }).toList();
+  }
 
   @override
   void initState() {
     super.initState();
-    api.connect();
     _messageSubscription = api.messages.listen((response) {
       String? sessionId = response["session_id"];
       String? status = response["status"];
       String? message = response["message"];
+
+      // Handle agent status (busy/ready) to toggle Stop button
+      if (status == "agent_status") {
+        final String agentStatus = response["agent_status"] ?? "ready";
+        setState(() {
+          if (currentSessionId != null && sessions.containsKey(currentSessionId)) {
+            if (agentStatus == "busy") {
+              sessions[currentSessionId!]!.currentNode = "busy";
+            } else {
+              sessions[currentSessionId!]!.currentNode = "";
+            }
+          }
+        });
+        return;
+      }
+
+      // Handle session_sync event
+      if (status == "session_sync") {
+        final List<dynamic> rawSessions = response["sessions"] ?? [];
+        setState(() {
+          for (var item in rawSessions) {
+            String? sid;
+            String? devId;
+            String? title;
+
+            if (item is String) {
+              sid = item;
+            } else if (item is Map) {
+              sid = item["session_id"]?.toString() ?? item["id"]?.toString();
+              devId = item["device_id"]?.toString() ?? item["deviceId"]?.toString();
+              title = item["title"]?.toString();
+            }
+
+            if (sid != null) {
+              String actualDevId = devId ?? "";
+              if (actualDevId.isEmpty || actualDevId == "null") {
+                actualDevId = devices.isNotEmpty ? devices.first["device_id"] ?? "" : "";
+              }
+              if (!sessions.containsKey(sid)) {
+                sessions[sid] = ChatSession(
+                  id: sid,
+                  deviceId: actualDevId,
+                  title: title ?? "새 대화",
+                );
+              } else {
+                if (title != null) {
+                  sessions[sid]!.title = title;
+                }
+                sessions[sid]!.deviceId = actualDevId;
+              }
+            }
+          }
+        });
+        return;
+      }
+
+      // Handle session_created event
+      if (status == "session_created") {
+        final String? sid = response["session_id"]?.toString() ?? response["id"]?.toString();
+        final String? devId = response["device_id"]?.toString() ?? response["deviceId"]?.toString();
+        final String? title = response["title"]?.toString();
+        if (sid != null) {
+          String actualDevId = devId ?? "";
+          if (actualDevId.isEmpty || actualDevId == "null") {
+            actualDevId = devices.isNotEmpty ? devices.first["device_id"] ?? "" : "";
+          }
+          setState(() {
+            if (!sessions.containsKey(sid)) {
+              sessions[sid] = ChatSession(
+                id: sid,
+                deviceId: actualDevId,
+                title: title ?? "새 대화",
+              );
+            }
+          });
+        }
+        return;
+      }
+
+      // Handle session_deleted event
+      if (status == "session_deleted") {
+        final String? sid = response["session_id"]?.toString() ?? response["id"]?.toString();
+        if (sid != null) {
+          setState(() {
+            sessions.remove(sid);
+            if (currentSessionId == sid) {
+              currentSessionId = null;
+            }
+          });
+        }
+        return;
+      }
+
+      // Handle session_update event
+      if (status == "session_update") {
+        final String? sid = response["session_id"]?.toString() ?? response["id"]?.toString();
+        final String? title = response["title"]?.toString();
+        if (sid != null && title != null) {
+          setState(() {
+            if (sessions.containsKey(sid)) {
+              sessions[sid]!.title = title;
+            }
+          });
+        }
+        return;
+      }
 
       if (sessionId == null) return;
 
       // 응답된 sessionId가 있고, 아직 세션 맵에 없다면 세션 구조에 반영
       if (!sessions.containsKey(sessionId)) {
         setState(() {
-          sessions[sessionId] = ChatSession(id: sessionId);
+          sessions[sessionId] = ChatSession(
+            id: sessionId,
+            deviceId: response["device_id"] ?? "",
+          );
         });
       }
       
@@ -90,6 +215,9 @@ class _ChatScreenState extends State<ChatScreen> {
       if (currentSessionId == null) {
         setState(() {
           currentSessionId = sessionId;
+          if (sessions.containsKey(sessionId)) {
+            selectedDeviceId = sessions[sessionId]!.deviceId;
+          }
         });
       }
 
@@ -105,13 +233,6 @@ class _ChatScreenState extends State<ChatScreen> {
               imageUrls: List<String>.from(response["images"] ?? []),
             ),
           );
-        });
-      } else if (status == "session_deleted") {
-        setState(() {
-          sessions.remove(sessionId);
-          if (currentSessionId == sessionId) {
-            currentSessionId = sessions.isNotEmpty ? sessions.keys.last : null;
-          }
         });
       } else if (status == "approval_required") {
         setState(() {
@@ -130,6 +251,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ChatMessage(text: "오류: $message", isUser: false, isError: true),
           );
           pendingToolId = null;
+          targetSession.currentNode = "";
         });
       } else if (status == "tool_start") {
         String toolName = response["tool_name"] ?? "";
@@ -190,8 +312,10 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      requestPermissions();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await requestPermissions();
+      await _loadDevices();
+      api.connect();
     });
   }
 
@@ -245,53 +369,158 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _createNewSession() {
-    String newId = api.generateUuidV4();
-    setState(() {
-      sessions[newId] = ChatSession(id: newId);
-      currentSessionId = newId;
-    });
-    api.createSession(newId);
+  Future<void> _loadDevices() async {
+    if (_isLoadingDevices) return;
+    if (mounted) {
+      setState(() {
+        _isLoadingDevices = true;
+      });
+    }
+    try {
+      final fetchedDevices = await api.getDevices();
+      final filteredList = fetchedDevices
+          .where((d) => d["device_type"]?.toString().toLowerCase() == "pc")
+          .toList();
+      
+      setState(() {
+        devices = filteredList;
+        if (devices.isNotEmpty) {
+          final String firstDevId = devices.first["device_id"] ?? "";
+          for (var session in sessions.values) {
+            if (session.deviceId.isEmpty || session.deviceId == "null") {
+              session.deviceId = firstDevId;
+            }
+          }
+          if (selectedDeviceId == null || !devices.any((d) => d["device_id"] == selectedDeviceId)) {
+            if (currentSessionId != null && sessions.containsKey(currentSessionId) && sessions[currentSessionId]!.deviceId.isNotEmpty) {
+              selectedDeviceId = sessions[currentSessionId]!.deviceId;
+            } else {
+              selectedDeviceId = firstDevId;
+            }
+          }
+        } else {
+          selectedDeviceId = null;
+        }
+      });
+
+      if (currentSessionId != null) {
+        final currentSession = sessions[currentSessionId];
+        if (currentSession != null) {
+          final sessionDeviceExists = devices.any((d) => d["device_id"] == currentSession.deviceId);
+          if (!sessionDeviceExists) {
+            setState(() {
+              currentSessionId = null;
+              selectedDeviceId = devices.isNotEmpty ? devices.first["device_id"] : null;
+            });
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("Failed to load devices: $e");
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingDevices = false;
+        });
+      }
+    }
   }
 
-  void _switchToSession(String sessionId) {
+  void _selectSession(String sessionId, String deviceId) async {
     setState(() {
       currentSessionId = sessionId;
+      selectedDeviceId = deviceId;
+      if (!sessions.containsKey(sessionId)) {
+        sessions[sessionId] = ChatSession(id: sessionId, deviceId: deviceId);
+      }
     });
-    // 서버에 대화 이력 요청 (동기화)
-    api.getHistory(sessionId);
-    
-    // 대화창 하단으로 스크롤 이동
+
+    try {
+      final historyData = await api.getHistoryHttp(sessionId, deviceId: deviceId);
+      final List<dynamic> historyList = historyData["history"] ?? [];
+      
+      setState(() {
+        sessions[sessionId]!.messages = historyList.map((item) {
+          final isUser = item["role"] == "user";
+          return ChatMessage(
+            text: item["message"] ?? "",
+            isUser: isUser,
+            imageUrls: List<String>.from(item["images"] ?? []),
+          );
+        }).toList();
+      });
+    } catch (e) {
+      debugPrint("Failed to load history for session $sessionId: $e");
+    }
+
     Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
   }
 
-  void _renameSession(String sessionId) {
-    TextEditingController renameController = TextEditingController(
-      text: sessions[sessionId]?.title ?? "",
-    );
+  void _createNewSessionForDevice(String deviceId) {
+    final newSessionId = api.generateUuidV4();
+    api.createSession(newSessionId, deviceId: deviceId);
+    setState(() {
+      sessions[newSessionId] = ChatSession(id: newSessionId, deviceId: deviceId, title: "새 대화");
+      currentSessionId = newSessionId;
+      selectedDeviceId = deviceId;
+    });
+  }
+
+  void _deleteSession(String sessionId, String deviceId) {
     showDialog(
       context: context,
-      builder: (context) {
+      builder: (dialogContext) {
         return AlertDialog(
-          title: const Text("이름 바꾸기"),
+          title: const Text("대화 세션 삭제"),
+          content: const Text("정말 이 대화 세션을 삭제하시겠습니까?"),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text("취소"),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () {
+                api.deleteSession(sessionId, deviceId: deviceId);
+                Navigator.pop(dialogContext);
+              },
+              child: const Text("삭제", style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _renameSession(String sessionId, String deviceId, String currentTitle) {
+    TextEditingController editController = TextEditingController(text: currentTitle);
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text("대화 세션 이름 수정"),
           content: TextField(
-            controller: renameController,
-            decoration: const InputDecoration(hintText: "새로운 채팅방 이름 입력"),
+            controller: editController,
+            decoration: const InputDecoration(hintText: "새로운 세션 이름 입력"),
             autofocus: true,
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () => Navigator.pop(dialogContext),
               child: const Text("취소"),
             ),
             ElevatedButton(
               onPressed: () {
-                if (renameController.text.trim().isNotEmpty) {
+                final newTitle = editController.text.trim();
+                if (newTitle.isNotEmpty) {
+                  api.updateSessionTitle(sessionId, newTitle, deviceId: deviceId);
                   setState(() {
-                    sessions[sessionId]!.title = renameController.text.trim();
+                    if (sessions.containsKey(sessionId)) {
+                      sessions[sessionId]!.title = newTitle;
+                    }
                   });
                 }
-                Navigator.pop(context);
+                Navigator.pop(dialogContext);
               },
               child: const Text("저장"),
             ),
@@ -301,41 +530,82 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _deleteSession(String sessionId) {
+  void _editDeviceName(String deviceId, String currentName) {
+    TextEditingController editController = TextEditingController(text: currentName);
     showDialog(
       context: context,
-      builder: (context) {
+      builder: (dialogContext) {
         return AlertDialog(
-          title: const Text("세션 삭제"),
-          content: const Text("정말 삭제하시겠습니까?"),
+          title: const Text("기기 이름 수정"),
+          content: TextField(
+            controller: editController,
+            decoration: const InputDecoration(hintText: "새로운 기기 이름 입력"),
+            autofocus: true,
+          ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text("취소"),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final newName = editController.text.trim();
+                if (newName.isNotEmpty) {
+                  try {
+                    await api.updateDeviceName(deviceId, newName);
+                    if (!dialogContext.mounted) return;
+                    Navigator.pop(dialogContext);
+                    _loadDevices();
+                  } catch (e) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text("기기 이름 수정 실패: $e")),
+                    );
+                  }
+                }
+              },
+              child: const Text("저장"),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _removeDevice(String deviceId) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text("기기 등록 해제"),
+          content: const Text("정말 이 기기를 계정에서 제거하시겠습니까?"),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
               child: const Text("취소"),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-              onPressed: () {
-                setState(() {
-                  sessions.remove(sessionId);
-                });
-                api.deleteSession(sessionId);
-                
-                if (currentSessionId == sessionId) {
-                  if (sessions.isNotEmpty) {
-                    setState(() {
-                      currentSessionId = sessions.keys.last;
-                    });
-                    api.getHistory(currentSessionId!);
-                  } else {
-                    setState(() {
+              onPressed: () async {
+                try {
+                  await api.deleteDevice(deviceId);
+                  if (!dialogContext.mounted) return;
+                  Navigator.pop(dialogContext);
+                  _loadDevices();
+                  setState(() {
+                    sessions.remove(deviceId);
+                    if (currentSessionId == deviceId) {
                       currentSessionId = null;
-                    });
-                  }
+                    }
+                  });
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text("기기 제거 실패: $e")),
+                  );
                 }
-                Navigator.pop(context);
               },
-              child: const Text("삭제", style: TextStyle(color: Colors.white)),
+              child: const Text("제거", style: TextStyle(color: Colors.white)),
             ),
           ],
         );
@@ -517,7 +787,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildDrawer(List<ChatSession> reversedSessions) {
+  Widget _buildDrawer(List<Map<String, dynamic>> filteredDevices) {
     return Drawer(
       child: SafeArea(
         child: Column(
@@ -532,15 +802,13 @@ class _ChatScreenState extends State<ChatScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   const Text(
-                    "채팅 목록",
+                    "기기 목록",
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.add_circle_outline),
-                    onPressed: () {
-                      _createNewSession();
-                      Navigator.of(context).pop();
-                    },
+                    icon: const Icon(Icons.refresh),
+                    tooltip: '새로고침',
+                    onPressed: _loadDevices,
                   ),
                 ],
               ),
@@ -575,7 +843,7 @@ class _ChatScreenState extends State<ChatScreen> {
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
               child: Text(
-                "Chats",
+                "Devices",
                 style: TextStyle(
                   color: Colors.grey,
                   fontWeight: FontWeight.bold,
@@ -583,59 +851,200 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             Expanded(
-              child: ListView.builder(
-                itemCount: reversedSessions.length,
-                itemBuilder: (context, index) {
-                  final session = reversedSessions[index];
-                  final isSelected = session.id == currentSessionId;
-                  return Container(
-                    margin: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: isSelected
-                          ? Colors.grey.shade200
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: ListTile(
-                      title: Text(
-                        session.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      onTap: () {
-                        _switchToSession(session.id);
-                        Navigator.of(context).pop();
+              flex: 2,
+              child: _isLoadingDevices
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView.builder(
+                      itemCount: filteredDevices.length,
+                      itemBuilder: (context, index) {
+                        final device = filteredDevices[index];
+                        final deviceId = device["device_id"] ?? "";
+                        final deviceName = device["device_name"] ?? "Unknown Device";
+                        final isOnline = device["is_online"] ?? false;
+                        final isSelected = deviceId == selectedDeviceId;
+
+                        return Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? Colors.blueAccent.withValues(alpha: 0.1)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(8),
+                            border: isSelected
+                                ? Border.all(color: Colors.blueAccent, width: 1)
+                                : Border.all(color: Colors.transparent),
+                          ),
+                          child: ListTile(
+                            leading: Container(
+                              width: 12,
+                              height: 12,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: isOnline ? Colors.green : Colors.grey,
+                              ),
+                            ),
+                            title: Text(
+                              deviceName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                color: isSelected ? Colors.blueAccent : Colors.black87,
+                              ),
+                            ),
+                            subtitle: Text(
+                              device["device_type"] ?? "pc",
+                              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                            ),
+                            onTap: () {
+                              setState(() {
+                                selectedDeviceId = deviceId;
+                              });
+                            },
+                            trailing: PopupMenuButton<String>(
+                              icon: const Icon(Icons.more_vert),
+                              onSelected: (value) {
+                                if (value == 'rename') {
+                                  _editDeviceName(deviceId, deviceName);
+                                } else if (value == 'delete') {
+                                  _removeDevice(deviceId);
+                                }
+                              },
+                              itemBuilder: (BuildContext context) =>
+                                  <PopupMenuEntry<String>>[
+                                    const PopupMenuItem<String>(
+                                      value: 'rename',
+                                      child: Text('기기 이름 수정'),
+                                    ),
+                                    const PopupMenuItem<String>(
+                                      value: 'delete',
+                                      child: Text(
+                                        '기기 제거',
+                                        style: TextStyle(color: Colors.red),
+                                      ),
+                                    ),
+                                  ],
+                            ),
+                          ),
+                        );
                       },
-                      trailing: PopupMenuButton<String>(
-                        icon: const Icon(Icons.more_vert),
-                        onSelected: (value) {
-                          if (value == 'rename') {
-                            _renameSession(session.id);
-                          } else if (value == 'delete') {
-                            _deleteSession(session.id);
-                          }
-                        },
-                        itemBuilder: (BuildContext context) =>
-                            <PopupMenuEntry<String>>[
-                              const PopupMenuItem<String>(
-                                value: 'rename',
-                                child: Text('이름 바꾸기'),
-                              ),
-                              const PopupMenuItem<String>(
-                                value: 'delete',
-                                child: Text(
-                                  '삭제',
-                                  style: TextStyle(color: Colors.red),
-                                ),
-                              ),
-                            ],
+                    ),
+            ),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      selectedDeviceId != null
+                          ? "'${filteredDevices.firstWhere((d) => d["device_id"] == selectedDeviceId, orElse: () => {"device_name": "선택된 기기"})["device_name"]}' 대화방"
+                          : "대화방 목록",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87,
                       ),
                     ),
+                  ),
+                  if (selectedDeviceId != null)
+                    IconButton(
+                      icon: const Icon(Icons.add_circle_outline, color: Colors.blueAccent, size: 22),
+                      tooltip: "새 대화 시작",
+                      onPressed: () => _createNewSessionForDevice(selectedDeviceId!),
+                    ),
+                ],
+              ),
+            ),
+            Expanded(
+              flex: 3,
+              child: Builder(
+                builder: (context) {
+                  if (selectedDeviceId == null) {
+                    return const Center(
+                      child: Text(
+                        "선택된 기기가 없습니다.",
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    );
+                  }
+
+                  final deviceSessions = sessions.values
+                      .where((s) => s.deviceId == selectedDeviceId)
+                      .toList();
+
+                  if (deviceSessions.isEmpty) {
+                    return const Center(
+                      child: Text(
+                        "생성된 대화방이 없습니다.",
+                        style: TextStyle(color: Colors.grey, fontSize: 13),
+                      ),
+                    );
+                  }
+
+                  return ListView.builder(
+                    itemCount: deviceSessions.length,
+                    itemBuilder: (context, index) {
+                      final session = deviceSessions[index];
+                      final isSelected = session.id == currentSessionId;
+                      return Container(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? Colors.blueAccent.withValues(alpha: 0.1)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: ListTile(
+                          dense: true,
+                          title: Text(
+                            session.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                              color: isSelected ? Colors.blueAccent : Colors.black87,
+                            ),
+                          ),
+                          onTap: () {
+                            _selectSession(session.id, selectedDeviceId!);
+                            Navigator.of(context).pop();
+                          },
+                          trailing: PopupMenuButton<String>(
+                            icon: const Icon(Icons.more_horiz, size: 18),
+                            onSelected: (value) {
+                              if (value == 'rename') {
+                                _renameSession(session.id, selectedDeviceId!, session.title);
+                              } else if (value == 'delete') {
+                                _deleteSession(session.id, selectedDeviceId!);
+                              }
+                            },
+                            itemBuilder: (BuildContext context) =>
+                                <PopupMenuEntry<String>>[
+                                  const PopupMenuItem<String>(
+                                    value: 'rename',
+                                    child: Text('대화 이름 수정'),
+                                  ),
+                                  const PopupMenuItem<String>(
+                                    value: 'delete',
+                                    child: Text(
+                                      '대화 삭제',
+                                      style: TextStyle(color: Colors.red),
+                                    ),
+                                  ),
+                                ],
+                          ),
+                        ),
+                      );
+                    },
                   );
-                },
+                }
               ),
             ),
             const Divider(height: 1),
@@ -644,9 +1053,22 @@ class _ChatScreenState extends State<ChatScreen> {
                 backgroundColor: Colors.grey.shade300,
                 child: const Icon(Icons.person, color: Colors.white),
               ),
-              title: const Text(
-                "polytech@kopo.ac.kr",
-                style: TextStyle(fontSize: 14),
+              title: Text(
+                api.email ?? "",
+                style: const TextStyle(fontSize: 14),
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.logout, color: Colors.redAccent),
+                tooltip: '로그아웃',
+                onPressed: () async {
+                  await api.logout();
+                  if (mounted) {
+                    Navigator.of(context).pushAndRemoveUntil(
+                      MaterialPageRoute(builder: (_) => const LoginScreen()),
+                      (route) => false,
+                    );
+                  }
+                },
               ),
             ),
             const SizedBox(height: 8),
@@ -751,10 +1173,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     borderRadius: BorderRadius.circular(28),
                   ),
                 ),
-                onPressed: _createNewSession,
-                icon: const Icon(Icons.add, color: Colors.white, size: 24),
+                onPressed: () {
+                  _scaffoldKey.currentState?.openDrawer();
+                },
+                icon: const Icon(Icons.devices, color: Colors.white, size: 24),
                 label: const Text(
-                  "새 대화 시작하기",
+                  "기기 선택하여 대화 시작하기",
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 18,
@@ -835,14 +1259,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final filteredSessions = sessions.values.where((s) {
-      return s.title.toLowerCase().contains(_searchQuery.toLowerCase());
-    }).toList();
-    final reversedSessions = filteredSessions.reversed.toList();
-
+    String titleText = "AI Agent";
+    if (currentSessionId != null && sessions.containsKey(currentSessionId)) {
+      titleText = sessions[currentSessionId!]!.title;
+    }
     return Scaffold(
-      appBar: AppBar(title: const Text("AI Agent")),
-      drawer: _buildDrawer(reversedSessions),
+      key: _scaffoldKey,
+      appBar: AppBar(
+        title: Text(titleText),
+      ),
+      drawer: _buildDrawer(filteredDevices),
       body: SafeArea(
         child: currentSessionId == null
             ? _buildIntroScreen()
@@ -975,6 +1401,24 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                         const SizedBox(width: 8),
+                        if (currentSessionId != null &&
+                            sessions[currentSessionId!]?.currentNode.isNotEmpty == true) ...[
+                          CircleAvatar(
+                            radius: 24,
+                            backgroundColor: Colors.redAccent,
+                            child: IconButton(
+                              color: Colors.white,
+                              icon: const Icon(Icons.stop),
+                              onPressed: () {
+                                api.sendStop(currentSessionId!);
+                                setState(() {
+                                  sessions[currentSessionId!]!.currentNode = "";
+                                });
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
                         CircleAvatar(
                           radius: 24,
                           backgroundColor: Theme.of(context).colorScheme.primary,
