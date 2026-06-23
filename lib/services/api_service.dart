@@ -22,6 +22,9 @@ class ApiService {
   final String baseUrl = "https://petagent.aikopo.net"; // 기존 이미지 업로드 API 서버 주소
   String? token;
   String? email;
+
+  // 호스트 PC의 사설 IP 주소를 이용해 에뮬레이터 및 실기기 모두에서 PC 로컬 에이전트와 동기화합니다.
+  String get localAgentUrl => "http://192.168.24.206:8001";
   
   String get wsUrl {
     final host = gatewayHost.trim();
@@ -137,6 +140,8 @@ class ApiService {
             mappedData["status"] = "approval_required";
             mappedData["message"] = rawPayload["message"] ?? "";
             mappedData["tool_call_id"] = rawPayload["tool_call_id"];
+            mappedData["tool_name"] = rawPayload["tool_name"] ?? "";
+            mappedData["tool_args"] = rawPayload["tool_args"];
           } else if (type == "done") {
             // Planner나 Worker 노드 필터링 때문에 메시지가 생략되는 것을 방지하기 위해 노드 초기화
             _messageController.add({
@@ -414,7 +419,7 @@ class ApiService {
       // Sync signup with local python agent
       try {
         await http.post(
-          Uri.parse("http://localhost:8001/api/signup"),
+          Uri.parse("$localAgentUrl/api/signup"),
           headers: {"Content-Type": "application/json"},
           body: jsonEncode({
             "email": email,
@@ -475,7 +480,7 @@ class ApiService {
       // Sync login with local python agent
       try {
         await http.post(
-          Uri.parse("http://localhost:8001/api/login"),
+          Uri.parse("$localAgentUrl/api/login"),
           headers: {"Content-Type": "application/json"},
           body: jsonEncode({
             "email": email,
@@ -522,7 +527,7 @@ class ApiService {
     // Sync logout with local python agent
     try {
       await http.post(
-        Uri.parse("http://localhost:8001/api/logout"),
+        Uri.parse("$localAgentUrl/api/logout"),
       ).timeout(const Duration(seconds: 2));
     } catch (e) {
       print("Failed to sync logout with local agent: $e");

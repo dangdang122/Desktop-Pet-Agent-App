@@ -4,6 +4,7 @@ import 'package:image_picker/image_picker.dart';
 import '../services/api_service.dart';
 import '../services/permission_service.dart';
 import 'dart:async';
+import 'dart:convert';
 import 'login_screen.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -13,12 +14,26 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+class AgentStepLog {
+  final String nodeName;
+  String details;
+  bool isCompleted;
+
+  AgentStepLog({
+    required this.nodeName,
+    required this.details,
+    this.isCompleted = false,
+  });
+}
+
 class ChatMessage {
   String text;
   final bool isUser;
   final bool isError;
   final bool isSystem;
   final List<String> imageUrls;
+  final List<AgentStepLog> logs;
+  bool isLogsCollapsed;
 
   ChatMessage({
     required this.text,
@@ -26,7 +41,9 @@ class ChatMessage {
     this.isError = false,
     this.isSystem = false,
     this.imageUrls = const [],
-  });
+    List<AgentStepLog>? logs,
+    this.isLogsCollapsed = false,
+  }) : logs = logs ?? [];
 }
 
 class ChatSession {
@@ -56,6 +73,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Map<String, ChatSession> sessions = {};
   String? currentSessionId;
   String? selectedDeviceId;
+
+  // 승인 요청 상세 상태
+  String? pendingToolName;
+  dynamic pendingToolArgs;
+  String? pendingMessage;
 
   List<ChatMessage> get messages {
     if (currentSessionId == null || !sessions.containsKey(currentSessionId)) {
@@ -238,12 +260,15 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           targetMessages.add(
             ChatMessage(
-              text: "승인 필요 → $message",
+              text: "⚠️ 승인 대기 중 → $message",
               isUser: false,
               isSystem: true,
             ),
           );
           pendingToolId = response["tool_call_id"];
+          pendingToolName = response["tool_name"];
+          pendingToolArgs = response["tool_args"];
+          pendingMessage = response["message"];
         });
       } else if (status == "error") {
         setState(() {
@@ -254,22 +279,31 @@ class _ChatScreenState extends State<ChatScreen> {
           targetSession.currentNode = "";
         });
       } else if (status == "tool_start") {
-        String toolName = response["tool_name"] ?? "";
+        final String toolName = response["tool_name"] ?? "";
+        final dynamic toolInput = response["tool_input"];
         setState(() {
           if (targetMessages.isEmpty ||
               targetMessages.last.isUser ||
               targetMessages.last.isSystem ||
               targetMessages.last.isError) {
             targetMessages.add(
-              ChatMessage(text: "🛠 도구 사용 중: $toolName\n", isUser: false),
+              ChatMessage(text: "", isUser: false),
             );
-          } else {
-            if (targetMessages.last.text.isNotEmpty &&
-                !targetMessages.last.text.endsWith("\n")) {
-              targetMessages.last.text += "\n";
-            }
-            targetMessages.last.text += "🛠 도구 사용 중: $toolName\n";
           }
+          final lastMsg = targetMessages.last;
+          if (lastMsg.logs.isNotEmpty) {
+            lastMsg.logs.last.isCompleted = true;
+          }
+          String detailsText = "🛠 도구 실행: $toolName";
+          if (toolInput != null) {
+            final inputStr = toolInput is String ? toolInput : const JsonEncoder().convert(toolInput);
+            detailsText += "\n인자: $inputStr";
+          }
+          lastMsg.logs.add(AgentStepLog(
+            nodeName: "tool",
+            details: detailsText,
+            isCompleted: false,
+          ));
         });
       } else if (status == "stream_chunk") {
         // Planner, Worker 등의 중간 노드에서 발생하는 JSON 스트리밍 청크는 무시
@@ -286,6 +320,9 @@ class _ChatScreenState extends State<ChatScreen> {
               targetMessages.last.isError) {
             targetMessages.add(ChatMessage(text: chunk, isUser: false));
           } else {
+            for (var log in targetMessages.last.logs) {
+              log.isCompleted = true;
+            }
             targetMessages.last.text += chunk;
           }
         });
@@ -294,9 +331,32 @@ class _ChatScreenState extends State<ChatScreen> {
           targetSession.currentNode = "";
         });
       } else if (status == "node_start") {
+        final String node = response["node"] ?? "";
         setState(() {
-          targetSession.currentNode = response["node"] ?? "";
+          targetSession.currentNode = node;
         });
+
+        if (node.isNotEmpty && node.toLowerCase() != "aggregator") {
+          setState(() {
+            if (targetMessages.isEmpty ||
+                targetMessages.last.isUser ||
+                targetMessages.last.isSystem ||
+                targetMessages.last.isError) {
+              targetMessages.add(ChatMessage(text: "", isUser: false));
+            }
+            final lastMsg = targetMessages.last;
+            if (lastMsg.logs.isEmpty || lastMsg.logs.last.nodeName != node) {
+              if (lastMsg.logs.isNotEmpty) {
+                lastMsg.logs.last.isCompleted = true;
+              }
+              lastMsg.logs.add(AgentStepLog(
+                nodeName: node,
+                details: "${_getNodeFriendlyName(node)} 동작 중...",
+                isCompleted: false,
+              ));
+            }
+          });
+        }
       } else {
         if (message != null && message.isNotEmpty) {
           setState(() {
@@ -464,6 +524,25 @@ class _ChatScreenState extends State<ChatScreen> {
       currentSessionId = newSessionId;
       selectedDeviceId = deviceId;
     });
+  }
+
+  void _selectDeviceAndGo(String deviceId) async {
+    setState(() {
+      selectedDeviceId = deviceId;
+    });
+
+    // 해당 기기의 대화방을 찾음
+    final deviceSessions = sessions.values
+        .where((s) => s.deviceId == deviceId)
+        .toList();
+
+    if (deviceSessions.isNotEmpty) {
+      // 가장 첫 번째 세션을 선택하여 이동
+      _selectSession(deviceSessions.first.id, deviceId);
+    } else {
+      // 세션이 없으면 새로 생성해서 이동
+      _createNewSessionForDevice(deviceId);
+    }
   }
 
   void _deleteSession(String sessionId, String deviceId) {
@@ -696,12 +775,30 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  String _getNodeFriendlyName(String node) {
+    switch (node.toLowerCase()) {
+      case "planner":
+        return "⚙️ Planner (작업 계획 수립)";
+      case "master_router":
+        return "🧠 Router (작업 라우팅)";
+      case "general_mcp_worker":
+        return "🛠 General Worker (도구 처리)";
+      case "vision_worker":
+        return "👁 Vision Worker (이미지 분석)";
+      default:
+        return "⚙️ $node";
+    }
+  }
+
   void _handleApprove(bool approve) {
     if (pendingToolId == null) return;
 
     api.approveTool(approve, pendingToolId!, sessionId: currentSessionId);
     setState(() {
       pendingToolId = null;
+      pendingToolName = null;
+      pendingToolArgs = null;
+      pendingMessage = null;
     });
   }
 
@@ -759,8 +856,106 @@ class _ChatScreenState extends State<ChatScreen> {
                   );
                 }).toList(),
               ),
-            if (message.imageUrls.isNotEmpty && message.text.isNotEmpty)
+            if (message.imageUrls.isNotEmpty && (message.text.isNotEmpty || message.logs.isNotEmpty))
               const SizedBox(height: 8),
+            if (!message.isUser && message.logs.isNotEmpty) ...[
+              StatefulBuilder(
+                builder: (context, setBubbleState) {
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade900,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () {
+                            setBubbleState(() {
+                              message.isLogsCollapsed = !message.isLogsCollapsed;
+                            });
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Row(
+                                  children: [
+                                    Icon(Icons.terminal_rounded, color: Colors.greenAccent, size: 18),
+                                    SizedBox(width: 8),
+                                    Text(
+                                      "에이전트 추론 로그",
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Icon(
+                                  message.isLogsCollapsed
+                                      ? Icons.keyboard_arrow_down_rounded
+                                      : Icons.keyboard_arrow_up_rounded,
+                                  color: Colors.white70,
+                                  size: 18,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (!message.isLogsCollapsed) ...[
+                          const Divider(color: Colors.white12, height: 1),
+                          Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: message.logs.map((log) {
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 4),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      if (!log.isCompleted) ...[
+                                        const SizedBox(
+                                          width: 12,
+                                          height: 12,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 1.5,
+                                            valueColor: AlwaysStoppedAnimation<Color>(Colors.greenAccent),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                      ] else ...[
+                                        const Icon(Icons.check_circle_outline_rounded, color: Colors.greenAccent, size: 14),
+                                        const SizedBox(width: 6),
+                                      ],
+                                      Expanded(
+                                        child: Text(
+                                          log.details,
+                                          style: const TextStyle(
+                                            color: Colors.greenAccent,
+                                            fontFamily: 'monospace',
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+                }
+              ),
+            ],
             if (message.text.isNotEmpty)
               message.isUser
                   ? Text(
@@ -1131,131 +1326,105 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const SizedBox(height: 40),
-            _buildFeatureCard(
-              icon: Icons.auto_awesome,
-              title: "데스크톱 자동 제어",
-              description: "마우스 제어, 파일 관리, 시스템 명령 수행 등 다양한 도구를 사용합니다.",
-            ),
-            const SizedBox(height: 12),
-            _buildFeatureCard(
-              icon: Icons.image_search,
-              title: "멀티모달 이미지 분석",
-              description: "화면 캡처나 이미지를 업로드하여 에이전트에게 상황을 설명할 수 있습니다.",
-            ),
-            const SizedBox(height: 12),
-            _buildFeatureCard(
-              icon: Icons.security,
-              title: "안전한 승인 기반 동작",
-              description: "중요한 도구 실행 시 사용자의 승인을 거쳐 안전하게 실행됩니다.",
-            ),
-            const SizedBox(height: 48),
-            Container(
-              width: double.infinity,
-              height: 56,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(28),
-                gradient: const LinearGradient(
-                  colors: [Colors.blueAccent, Colors.purpleAccent],
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.blueAccent.withValues(alpha: 0.35),
-                    blurRadius: 15,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-              ),
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.transparent,
-                  shadowColor: Colors.transparent,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(28),
-                  ),
-                ),
-                onPressed: () {
-                  _scaffoldKey.currentState?.openDrawer();
-                },
-                icon: const Icon(Icons.devices, color: Colors.white, size: 24),
-                label: const Text(
-                  "기기 선택하여 대화 시작하기",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                "연결 가능한 데스크톱 기기",
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black54,
                 ),
               ),
             ),
+            const SizedBox(height: 12),
+            _isLoadingDevices
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24.0),
+                    child: CircularProgressIndicator(),
+                  )
+                : filteredDevices.isEmpty
+                    ? Column(
+                        children: [
+                          const Text(
+                            "등록된 PC 기기가 없습니다.",
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                          const SizedBox(height: 12),
+                          IconButton(
+                            icon: const Icon(Icons.refresh),
+                            onPressed: _loadDevices,
+                          ),
+                        ],
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: filteredDevices.length,
+                        itemBuilder: (context, index) {
+                          final device = filteredDevices[index];
+                          final deviceId = device["device_id"] ?? "";
+                          final deviceName = device["device_name"] ?? "Unknown Device";
+                          final isOnline = device["is_online"] ?? false;
+
+                          return Container(
+                            margin: const EdgeInsets.symmetric(vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.grey.shade200),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.03),
+                                  blurRadius: 6,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
+                            ),
+                            child: ListTile(
+                              leading: Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: isOnline
+                                      ? Colors.green.shade50
+                                      : Colors.grey.shade100,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Icon(
+                                  Icons.desktop_windows_rounded,
+                                  color: isOnline ? Colors.green : Colors.grey,
+                                ),
+                              ),
+                              title: Text(
+                                deviceName,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.black87,
+                                ),
+                              ),
+                              subtitle: Text(
+                                isOnline ? "온라인" : "오프라인",
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: isOnline ? Colors.green.shade700 : Colors.grey,
+                                ),
+                              ),
+                              trailing: const Icon(
+                                Icons.chevron_right_rounded,
+                                color: Colors.grey,
+                              ),
+                              onTap: () => _selectDeviceAndGo(deviceId),
+                            ),
+                          );
+                        },
+                      ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildFeatureCard({
-    required IconData icon,
-    required String title,
-    required String description,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade100, width: 1.5),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.02),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Colors.blueAccent.withValues(alpha: 0.08),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              icon,
-              color: Colors.blueAccent,
-              size: 24,
-            ),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black87,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  description,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.grey.shade600,
-                    height: 1.4,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -1263,34 +1432,145 @@ class _ChatScreenState extends State<ChatScreen> {
     if (currentSessionId != null && sessions.containsKey(currentSessionId)) {
       titleText = sessions[currentSessionId!]!.title;
     }
+    final hasActiveSession = currentSessionId != null;
     return Scaffold(
       key: _scaffoldKey,
       appBar: AppBar(
         title: Text(titleText),
+        automaticallyImplyLeading: hasActiveSession,
       ),
-      drawer: _buildDrawer(filteredDevices),
+      drawer: hasActiveSession ? _buildDrawer(filteredDevices) : null,
       body: SafeArea(
         child: currentSessionId == null
             ? _buildIntroScreen()
             : Column(
                 children: [
                   if (pendingToolId != null)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 8,
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          ElevatedButton(
-                            onPressed: () => _handleApprove(true),
-                            child: const Text("Approve"),
+                    Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.amber.shade50.withValues(alpha: 0.95),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.amber.shade300, width: 1.5),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.08),
+                            blurRadius: 10,
+                            offset: const Offset(0, 4),
                           ),
-                          const SizedBox(width: 10),
-                          ElevatedButton(
-                            onPressed: () => _handleApprove(false),
-                            child: const Text("Reject"),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.gpp_maybe_rounded, color: Colors.amber.shade800, size: 28),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      "⚠️ 위험 작업 실행 승인 요청",
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 16,
+                                        color: Colors.amber.shade900,
+                                      ),
+                                    ),
+                                    if (pendingToolName != null) ...[
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        "도구: $pendingToolName",
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13,
+                                          color: Colors.black87,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          if (pendingMessage != null && pendingMessage!.isNotEmpty) ...[
+                            Text(
+                              pendingMessage!,
+                              style: const TextStyle(fontSize: 14, color: Colors.black87, height: 1.4),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+                          if (pendingToolArgs != null) ...[
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.8),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: Colors.amber.shade100),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    "전달 파라미터 (Arguments):",
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    pendingToolArgs is String
+                                        ? pendingToolArgs
+                                        : const JsonEncoder.withIndent('  ').convert(pendingToolArgs),
+                                    style: const TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 12,
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                          ],
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              OutlinedButton(
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.redAccent,
+                                  side: const BorderSide(color: Colors.redAccent, width: 1.5),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                                ),
+                                onPressed: () => _handleApprove(false),
+                                child: const Text(
+                                  "거절 (Reject)",
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.amber.shade800,
+                                  foregroundColor: Colors.white,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                                  elevation: 2,
+                                ),
+                                onPressed: () => _handleApprove(true),
+                                child: const Text(
+                                  "허용 (Approve)",
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
