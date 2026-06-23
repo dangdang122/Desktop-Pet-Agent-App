@@ -73,6 +73,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Map<String, ChatSession> sessions = {};
   String? currentSessionId;
   String? selectedDeviceId;
+  bool _hasSelectedDevice = false;
 
   // 승인 요청 상세 상태
   String? pendingToolName;
@@ -529,6 +530,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _selectDeviceAndGo(String deviceId) async {
     setState(() {
       selectedDeviceId = deviceId;
+      _hasSelectedDevice = true;
     });
 
     // 해당 기기의 대화방을 찾음
@@ -1258,6 +1260,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 onPressed: () async {
                   await api.logout();
                   if (mounted) {
+                    setState(() {
+                      _hasSelectedDevice = false;
+                    });
                     Navigator.of(context).pushAndRemoveUntil(
                       MaterialPageRoute(builder: (_) => const LoginScreen()),
                       (route) => false,
@@ -1424,6 +1429,119 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildEmptyChatScreen() {
+    final deviceName = selectedDeviceId != null
+        ? (devices.firstWhere(
+            (d) => d["device_id"] == selectedDeviceId,
+            orElse: () => {"device_name": "선택된 기기"},
+          )["device_name"] ?? "선택된 기기")
+        : "선택된 기기";
+
+    return Center(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 32.0),
+        margin: const EdgeInsets.all(24.0),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.blueAccent.withValues(alpha: 0.08),
+              blurRadius: 30,
+              offset: const Offset(0, 10),
+            ),
+          ],
+          border: Border.all(color: Colors.grey.shade100),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  colors: [
+                    Colors.blueAccent.withValues(alpha: 0.2),
+                    Colors.purpleAccent.withValues(alpha: 0.1)
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+              ),
+              child: const Icon(
+                Icons.chat_bubble_outline_rounded,
+                size: 48,
+                color: Colors.blueAccent,
+              ),
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              "새 채팅을 시작해보세요!",
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              "연결된 기기: $deviceName\n새로운 대화를 만들어 에이전트와 이야기를 시작해 보세요.",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey.shade600,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 32),
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                gradient: const LinearGradient(
+                  colors: [Colors.blueAccent, Colors.purpleAccent],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.blueAccent.withValues(alpha: 0.3),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                ),
+                icon: const Icon(Icons.add, size: 20),
+                label: const Text(
+                  "새 대화 시작하기",
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                onPressed: selectedDeviceId != null
+                    ? () => _createNewSessionForDevice(selectedDeviceId!)
+                    : null,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
 
 
   @override
@@ -1431,18 +1549,24 @@ class _ChatScreenState extends State<ChatScreen> {
     String titleText = "AI Agent";
     if (currentSessionId != null && sessions.containsKey(currentSessionId)) {
       titleText = sessions[currentSessionId!]!.title;
+    } else if (_hasSelectedDevice && selectedDeviceId != null) {
+      final deviceName = devices.firstWhere(
+        (d) => d["device_id"] == selectedDeviceId,
+        orElse: () => {"device_name": ""},
+      )["device_name"] ?? "";
+      titleText = deviceName.isNotEmpty ? "$deviceName 대화방" : "새 대화";
     }
-    final hasActiveSession = currentSessionId != null;
+    final showDrawer = _hasSelectedDevice;
     return Scaffold(
       key: _scaffoldKey,
       appBar: AppBar(
         title: Text(titleText),
-        automaticallyImplyLeading: hasActiveSession,
+        automaticallyImplyLeading: showDrawer,
       ),
-      drawer: hasActiveSession ? _buildDrawer(filteredDevices) : null,
+      drawer: showDrawer ? _buildDrawer(filteredDevices) : null,
       body: SafeArea(
         child: currentSessionId == null
-            ? _buildIntroScreen()
+            ? (_hasSelectedDevice ? _buildEmptyChatScreen() : _buildIntroScreen())
             : Column(
                 children: [
                   if (pendingToolId != null)
