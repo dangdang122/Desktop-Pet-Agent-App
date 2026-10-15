@@ -8,7 +8,9 @@ import 'dart:convert';
 import 'login_screen.dart';
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key});
+  const ChatScreen({super.key, this.api});
+
+  final ApiService? api;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -42,7 +44,7 @@ class ChatMessage {
     this.isSystem = false,
     this.imageUrls = const [],
     List<AgentStepLog>? logs,
-    this.isLogsCollapsed = false,
+    this.isLogsCollapsed = true,
   }) : logs = logs ?? [];
 }
 
@@ -52,6 +54,7 @@ class ChatSession {
   String title;
   List<ChatMessage> messages;
   String currentNode; // 각 세션별 실행 노드 추적
+  bool hasSetInitialTitle; // 최초 요약 제목 설정 여부
 
   ChatSession({
     required this.id,
@@ -59,11 +62,12 @@ class ChatSession {
     this.title = "새 대화",
     List<ChatMessage>? messages,
     this.currentNode = "",
+    this.hasSetInitialTitle = false,
   }) : messages = messages ?? [];
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  final ApiService api = ApiService();
+  late final ApiService api = widget.api ?? ApiService();
 
   final TextEditingController controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -84,12 +88,22 @@ class _ChatScreenState extends State<ChatScreen> {
     if (currentSessionId == null || !sessions.containsKey(currentSessionId)) {
       return [];
     }
-    return sessions[currentSessionId!]!.messages;
+    final session = sessions[currentSessionId!]!;
+    final allMsgs = session.messages;
+
+    if (session.currentNode.isEmpty) {
+      return allMsgs.where((msg) {
+        if (!msg.isUser && !msg.isError && !msg.isSystem && msg.text.isEmpty) {
+          return false;
+        }
+        return true;
+      }).toList();
+    }
+    return allMsgs;
   }
 
   String? pendingToolId;
   StreamSubscription<Map<String, dynamic>>? _messageSubscription;
-
 
   String _searchQuery = ""; // 세션 검색용 상태
 
@@ -100,6 +114,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   List<Map<String, dynamic>> devices = [];
   bool _isLoadingDevices = false;
+  bool _isLoggingOut = false;
 
   List<Map<String, dynamic>> get filteredDevices {
     return devices.where((device) {
@@ -112,6 +127,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _messageSubscription = api.messages.listen((response) {
+      if (!mounted || _isLoggingOut) return;
       String? sessionId = response["session_id"];
       String? status = response["status"];
       String? message = response["message"];
@@ -120,7 +136,8 @@ class _ChatScreenState extends State<ChatScreen> {
       if (status == "agent_status") {
         final String agentStatus = response["agent_status"] ?? "ready";
         setState(() {
-          if (currentSessionId != null && sessions.containsKey(currentSessionId)) {
+          if (currentSessionId != null &&
+              sessions.containsKey(currentSessionId)) {
             if (agentStatus == "busy") {
               sessions[currentSessionId!]!.currentNode = "busy";
             } else {
@@ -144,24 +161,32 @@ class _ChatScreenState extends State<ChatScreen> {
               sid = item;
             } else if (item is Map) {
               sid = item["session_id"]?.toString() ?? item["id"]?.toString();
-              devId = item["device_id"]?.toString() ?? item["deviceId"]?.toString();
+              devId =
+                  item["device_id"]?.toString() ?? item["deviceId"]?.toString();
               title = item["title"]?.toString();
             }
 
             if (sid != null) {
               String actualDevId = devId ?? "";
               if (actualDevId.isEmpty || actualDevId == "null") {
-                actualDevId = devices.isNotEmpty ? devices.first["device_id"] ?? "" : "";
+                actualDevId = devices.isNotEmpty
+                    ? devices.first["device_id"] ?? ""
+                    : "";
               }
+              final isInitial = title != null && title != "새 대화";
               if (!sessions.containsKey(sid)) {
                 sessions[sid] = ChatSession(
                   id: sid,
                   deviceId: actualDevId,
                   title: title ?? "새 대화",
+                  hasSetInitialTitle: isInitial,
                 );
               } else {
                 if (title != null) {
                   sessions[sid]!.title = title;
+                  if (isInitial) {
+                    sessions[sid]!.hasSetInitialTitle = true;
+                  }
                 }
                 sessions[sid]!.deviceId = actualDevId;
               }
@@ -173,20 +198,27 @@ class _ChatScreenState extends State<ChatScreen> {
 
       // Handle session_created event
       if (status == "session_created") {
-        final String? sid = response["session_id"]?.toString() ?? response["id"]?.toString();
-        final String? devId = response["device_id"]?.toString() ?? response["deviceId"]?.toString();
+        final String? sid =
+            response["session_id"]?.toString() ?? response["id"]?.toString();
+        final String? devId =
+            response["device_id"]?.toString() ??
+            response["deviceId"]?.toString();
         final String? title = response["title"]?.toString();
         if (sid != null) {
           String actualDevId = devId ?? "";
           if (actualDevId.isEmpty || actualDevId == "null") {
-            actualDevId = devices.isNotEmpty ? devices.first["device_id"] ?? "" : "";
+            actualDevId = devices.isNotEmpty
+                ? devices.first["device_id"] ?? ""
+                : "";
           }
+          final isInitial = title != null && title != "새 대화";
           setState(() {
             if (!sessions.containsKey(sid)) {
               sessions[sid] = ChatSession(
                 id: sid,
                 deviceId: actualDevId,
                 title: title ?? "새 대화",
+                hasSetInitialTitle: isInitial,
               );
             }
           });
@@ -196,7 +228,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
       // Handle session_deleted event
       if (status == "session_deleted") {
-        final String? sid = response["session_id"]?.toString() ?? response["id"]?.toString();
+        final String? sid =
+            response["session_id"]?.toString() ?? response["id"]?.toString();
         if (sid != null) {
           setState(() {
             sessions.remove(sid);
@@ -210,12 +243,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
       // Handle session_update event
       if (status == "session_update") {
-        final String? sid = response["session_id"]?.toString() ?? response["id"]?.toString();
+        final String? sid =
+            response["session_id"]?.toString() ?? response["id"]?.toString();
         final String? title = response["title"]?.toString();
         if (sid != null && title != null) {
           setState(() {
             if (sessions.containsKey(sid)) {
-              sessions[sid]!.title = title;
+              final session = sessions[sid]!;
+              if (session.title == "새 대화" || !session.hasSetInitialTitle) {
+                session.title = title;
+                if (title != "새 대화") {
+                  session.hasSetInitialTitle = true;
+                }
+              }
             }
           });
         }
@@ -233,7 +273,7 @@ class _ChatScreenState extends State<ChatScreen> {
           );
         });
       }
-      
+
       // 만약 현재 세션이 없으면 응답된 sessionId로 설정
       if (currentSessionId == null) {
         setState(() {
@@ -249,6 +289,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
       if (status == "chat_message") {
         setState(() {
+          pendingToolId = null;
+          pendingToolName = null;
+          pendingToolArgs = null;
+          pendingMessage = null;
           targetMessages.add(
             ChatMessage(
               text: message ?? "",
@@ -277,19 +321,24 @@ class _ChatScreenState extends State<ChatScreen> {
             ChatMessage(text: "오류: $message", isUser: false, isError: true),
           );
           pendingToolId = null;
+          pendingToolName = null;
+          pendingToolArgs = null;
+          pendingMessage = null;
           targetSession.currentNode = "";
         });
       } else if (status == "tool_start") {
         final String toolName = response["tool_name"] ?? "";
         final dynamic toolInput = response["tool_input"];
         setState(() {
+          pendingToolId = null;
+          pendingToolName = null;
+          pendingToolArgs = null;
+          pendingMessage = null;
           if (targetMessages.isEmpty ||
               targetMessages.last.isUser ||
               targetMessages.last.isSystem ||
               targetMessages.last.isError) {
-            targetMessages.add(
-              ChatMessage(text: "", isUser: false),
-            );
+            targetMessages.add(ChatMessage(text: "", isUser: false));
           }
           final lastMsg = targetMessages.last;
           if (lastMsg.logs.isNotEmpty) {
@@ -297,24 +346,35 @@ class _ChatScreenState extends State<ChatScreen> {
           }
           String detailsText = "🛠 도구 실행: $toolName";
           if (toolInput != null) {
-            final inputStr = toolInput is String ? toolInput : const JsonEncoder().convert(toolInput);
+            final inputStr = toolInput is String
+                ? toolInput
+                : const JsonEncoder().convert(toolInput);
             detailsText += "\n인자: $inputStr";
           }
-          lastMsg.logs.add(AgentStepLog(
-            nodeName: "tool",
-            details: detailsText,
-            isCompleted: false,
-          ));
+          lastMsg.logs.add(
+            AgentStepLog(
+              nodeName: "tool",
+              details: detailsText,
+              isCompleted: false,
+            ),
+          );
         });
       } else if (status == "stream_chunk") {
-        // Planner, Worker 등의 중간 노드에서 발생하는 JSON 스트리밍 청크는 무시
+        // Planner, Worker, Router 등의 중간 노드에서 발생하는 JSON 스트리밍 청크는 무시
         final node = targetSession.currentNode.toLowerCase();
-        if (node == "planner" || node == "worker") {
+        if (node.contains("planner") ||
+            node.contains("worker") ||
+            node.contains("router")) {
           return;
         }
 
         String chunk = response["chunk"] ?? "";
+        if (chunk.isEmpty) return;
         setState(() {
+          pendingToolId = null;
+          pendingToolName = null;
+          pendingToolArgs = null;
+          pendingMessage = null;
           if (targetMessages.isEmpty ||
               targetMessages.last.isUser ||
               targetMessages.last.isSystem ||
@@ -329,7 +389,33 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       } else if (status == "stream_end") {
         setState(() {
+          pendingToolId = null;
+          pendingToolName = null;
+          pendingToolArgs = null;
+          pendingMessage = null;
           targetSession.currentNode = "";
+          // 최종 전문은 중간 노드 필터와 무관하게 표시하고 기존 청크를 대체한다.
+          final String finalMessage = response["final_message"] ?? "";
+          if (finalMessage.isNotEmpty) {
+            if (targetMessages.isEmpty ||
+                targetMessages.last.isUser ||
+                targetMessages.last.isSystem ||
+                targetMessages.last.isError) {
+              targetMessages.add(
+                ChatMessage(text: finalMessage, isUser: false),
+              );
+            } else {
+              targetMessages.last.text = finalMessage;
+            }
+          }
+          // 현재 응답의 로그를 모두 완료하고, 사용자가 열어둔 패널도 접는다.
+          for (final msg in targetMessages.reversed) {
+            if (msg.isUser) break;
+            msg.isLogsCollapsed = true;
+            for (final log in msg.logs) {
+              log.isCompleted = true;
+            }
+          }
         });
       } else if (status == "node_start") {
         final String node = response["node"] ?? "";
@@ -350,11 +436,13 @@ class _ChatScreenState extends State<ChatScreen> {
               if (lastMsg.logs.isNotEmpty) {
                 lastMsg.logs.last.isCompleted = true;
               }
-              lastMsg.logs.add(AgentStepLog(
-                nodeName: node,
-                details: "${_getNodeFriendlyName(node)} 동작 중...",
-                isCompleted: false,
-              ));
+              lastMsg.logs.add(
+                AgentStepLog(
+                  nodeName: node,
+                  details: "${_getNodeFriendlyName(node)} 동작 중...",
+                  isCompleted: false,
+                ),
+              );
             }
           });
         }
@@ -363,6 +451,9 @@ class _ChatScreenState extends State<ChatScreen> {
           setState(() {
             targetMessages.add(ChatMessage(text: message, isUser: false));
             pendingToolId = null;
+            pendingToolName = null;
+            pendingToolArgs = null;
+            pendingMessage = null;
           });
         }
       }
@@ -372,10 +463,11 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
 
-
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await requestPermissions();
+      if (!mounted || _isLoggingOut) return;
       await _loadDevices();
+      if (!mounted || _isLoggingOut || api.isTokenExpired()) return;
       api.connect();
     });
   }
@@ -390,12 +482,32 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _scrollToEnd() {
-    if (_scrollController.hasClients) {
+    if (mounted && _scrollController.hasClients) {
       _scrollController.animateTo(
         _scrollController.position.maxScrollExtent,
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeOut,
       );
+    }
+  }
+
+  Future<void> _handleLogout() async {
+    if (_isLoggingOut) return;
+    setState(() => _isLoggingOut = true);
+    await _messageSubscription?.cancel();
+    try {
+      await api.logout();
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => LoginScreen(api: api)),
+        (route) => false,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isLoggingOut = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("로그아웃 처리에 실패했습니다: $e")));
     }
   }
 
@@ -406,20 +518,14 @@ class _ChatScreenState extends State<ChatScreen> {
     controller.clear();
 
     List<String> currentUrls = List.from(_uploadedImageUrls);
-    setState(() {
-      messages.add(
-        ChatMessage(text: userMessage, isUser: true, imageUrls: currentUrls),
-      );
-      _uploadedImageUrls.clear();
-
-      // 세션 제목이 기본값이면 첫 번째 사용자 메시지로 자동 지정
-      if (currentSessionId != null &&
-          sessions[currentSessionId!]!.title == "새 대화") {
-        sessions[currentSessionId!]!.title = userMessage.length > 20
-            ? "${userMessage.substring(0, 20)}..."
-            : userMessage;
-      }
-    });
+    if (currentSessionId != null && sessions.containsKey(currentSessionId)) {
+      setState(() {
+        sessions[currentSessionId!]!.messages.add(
+          ChatMessage(text: userMessage, isUser: true, imageUrls: currentUrls),
+        );
+        _uploadedImageUrls.clear();
+      });
+    }
 
     Future.delayed(const Duration(milliseconds: 50), _scrollToEnd);
 
@@ -439,10 +545,11 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     try {
       final fetchedDevices = await api.getDevices();
+      if (!mounted || _isLoggingOut) return;
       final filteredList = fetchedDevices
           .where((d) => d["device_type"]?.toString().toLowerCase() == "pc")
           .toList();
-      
+
       setState(() {
         devices = filteredList;
         if (devices.isNotEmpty) {
@@ -452,8 +559,11 @@ class _ChatScreenState extends State<ChatScreen> {
               session.deviceId = firstDevId;
             }
           }
-          if (selectedDeviceId == null || !devices.any((d) => d["device_id"] == selectedDeviceId)) {
-            if (currentSessionId != null && sessions.containsKey(currentSessionId) && sessions[currentSessionId]!.deviceId.isNotEmpty) {
+          if (selectedDeviceId == null ||
+              !devices.any((d) => d["device_id"] == selectedDeviceId)) {
+            if (currentSessionId != null &&
+                sessions.containsKey(currentSessionId) &&
+                sessions[currentSessionId]!.deviceId.isNotEmpty) {
               selectedDeviceId = sessions[currentSessionId]!.deviceId;
             } else {
               selectedDeviceId = firstDevId;
@@ -467,11 +577,15 @@ class _ChatScreenState extends State<ChatScreen> {
       if (currentSessionId != null) {
         final currentSession = sessions[currentSessionId];
         if (currentSession != null) {
-          final sessionDeviceExists = devices.any((d) => d["device_id"] == currentSession.deviceId);
+          final sessionDeviceExists = devices.any(
+            (d) => d["device_id"] == currentSession.deviceId,
+          );
           if (!sessionDeviceExists) {
             setState(() {
               currentSessionId = null;
-              selectedDeviceId = devices.isNotEmpty ? devices.first["device_id"] : null;
+              selectedDeviceId = devices.isNotEmpty
+                  ? devices.first["device_id"]
+                  : null;
             });
           }
         }
@@ -497,9 +611,13 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     try {
-      final historyData = await api.getHistoryHttp(sessionId, deviceId: deviceId);
+      final historyData = await api.getHistoryHttp(
+        sessionId,
+        deviceId: deviceId,
+      );
+      if (!mounted || _isLoggingOut) return;
       final List<dynamic> historyList = historyData["history"] ?? [];
-      
+
       setState(() {
         sessions[sessionId]!.messages = historyList.map((item) {
           final isUser = item["role"] == "user";
@@ -521,7 +639,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final newSessionId = api.generateUuidV4();
     api.createSession(newSessionId, deviceId: deviceId);
     setState(() {
-      sessions[newSessionId] = ChatSession(id: newSessionId, deviceId: deviceId, title: "새 대화");
+      sessions[newSessionId] = ChatSession(
+        id: newSessionId,
+        deviceId: deviceId,
+        title: "새 대화",
+      );
       currentSessionId = newSessionId;
       selectedDeviceId = deviceId;
     });
@@ -574,7 +696,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _renameSession(String sessionId, String deviceId, String currentTitle) {
-    TextEditingController editController = TextEditingController(text: currentTitle);
+    TextEditingController editController = TextEditingController(
+      text: currentTitle,
+    );
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -594,7 +718,11 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () {
                 final newTitle = editController.text.trim();
                 if (newTitle.isNotEmpty) {
-                  api.updateSessionTitle(sessionId, newTitle, deviceId: deviceId);
+                  api.updateSessionTitle(
+                    sessionId,
+                    newTitle,
+                    deviceId: deviceId,
+                  );
                   setState(() {
                     if (sessions.containsKey(sessionId)) {
                       sessions[sessionId]!.title = newTitle;
@@ -612,7 +740,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _editDeviceName(String deviceId, String currentName) {
-    TextEditingController editController = TextEditingController(text: currentName);
+    TextEditingController editController = TextEditingController(
+      text: currentName,
+    );
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -639,9 +769,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     _loadDevices();
                   } catch (e) {
                     if (!mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text("기기 이름 수정 실패: $e")),
-                    );
+                    ScaffoldMessenger.of(
+                      context,
+                    ).showSnackBar(SnackBar(content: Text("기기 이름 수정 실패: $e")));
                   }
                 }
               },
@@ -681,9 +811,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   });
                 } catch (e) {
                   if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text("기기 제거 실패: $e")),
-                  );
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text("기기 제거 실패: $e")));
                 }
               },
               child: const Text("제거", style: TextStyle(color: Colors.white)),
@@ -756,17 +886,25 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     try {
-      List<String> urls = await api.uploadImages(validImages);
+      List<String> base64Urls = [];
+      for (var img in validImages) {
+        final bytes = await img.readAsBytes();
+        final base64Str = base64Encode(bytes);
+        final extension = img.path.split('.').last.toLowerCase();
+        final mimeType = extension == 'png' ? 'image/png' : 'image/jpeg';
+        base64Urls.add("data:$mimeType;base64,$base64Str");
+      }
+
       if (mounted) {
         setState(() {
-          _uploadedImageUrls.addAll(urls);
+          _uploadedImageUrls.addAll(base64Urls);
         });
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text("이미지 업로드 실패: $e")));
+        ).showSnackBar(SnackBar(content: Text("이미지 처리 실패: $e")));
       }
     } finally {
       if (mounted) {
@@ -806,7 +944,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildBubble(ChatMessage message) {
     final backgroundColor = message.isUser
-        ? Colors.blueAccent
+        ? Colors.blue
         : (message.isError
               ? Colors.red.shade100
               : (message.isSystem
@@ -858,7 +996,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   );
                 }).toList(),
               ),
-            if (message.imageUrls.isNotEmpty && (message.text.isNotEmpty || message.logs.isNotEmpty))
+            if (message.imageUrls.isNotEmpty &&
+                (message.text.isNotEmpty || message.logs.isNotEmpty))
               const SizedBox(height: 8),
             if (!message.isUser && message.logs.isNotEmpty) ...[
               StatefulBuilder(
@@ -876,17 +1015,25 @@ class _ChatScreenState extends State<ChatScreen> {
                           borderRadius: BorderRadius.circular(12),
                           onTap: () {
                             setBubbleState(() {
-                              message.isLogsCollapsed = !message.isLogsCollapsed;
+                              message.isLogsCollapsed =
+                                  !message.isLogsCollapsed;
                             });
                           },
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
+                            ),
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
                                 const Row(
                                   children: [
-                                    Icon(Icons.terminal_rounded, color: Colors.greenAccent, size: 18),
+                                    Icon(
+                                      Icons.terminal_rounded,
+                                      color: Colors.greenAccent,
+                                      size: 18,
+                                    ),
                                     SizedBox(width: 8),
                                     Text(
                                       "에이전트 추론 로그",
@@ -917,9 +1064,12 @@ class _ChatScreenState extends State<ChatScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: message.logs.map((log) {
                                 return Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 4),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 4,
+                                  ),
                                   child: Row(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       if (!log.isCompleted) ...[
                                         const SizedBox(
@@ -927,12 +1077,19 @@ class _ChatScreenState extends State<ChatScreen> {
                                           height: 12,
                                           child: CircularProgressIndicator(
                                             strokeWidth: 1.5,
-                                            valueColor: AlwaysStoppedAnimation<Color>(Colors.greenAccent),
+                                            valueColor:
+                                                AlwaysStoppedAnimation<Color>(
+                                                  Colors.greenAccent,
+                                                ),
                                           ),
                                         ),
                                         const SizedBox(width: 8),
                                       ] else ...[
-                                        const Icon(Icons.check_circle_outline_rounded, color: Colors.greenAccent, size: 14),
+                                        const Icon(
+                                          Icons.check_circle_outline_rounded,
+                                          color: Colors.greenAccent,
+                                          size: 14,
+                                        ),
                                         const SizedBox(width: 6),
                                       ],
                                       Expanded(
@@ -955,7 +1112,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       ],
                     ),
                   );
-                }
+                },
               ),
             ],
             if (message.text.isNotEmpty)
@@ -1056,19 +1213,23 @@ class _ChatScreenState extends State<ChatScreen> {
                       itemBuilder: (context, index) {
                         final device = filteredDevices[index];
                         final deviceId = device["device_id"] ?? "";
-                        final deviceName = device["device_name"] ?? "Unknown Device";
+                        final deviceName =
+                            device["device_name"] ?? "Unknown Device";
                         final isOnline = device["is_online"] ?? false;
                         final isSelected = deviceId == selectedDeviceId;
 
                         return Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          margin: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 4,
+                          ),
                           decoration: BoxDecoration(
                             color: isSelected
-                                ? Colors.blueAccent.withValues(alpha: 0.1)
+                                ? Colors.blue.withValues(alpha: 0.1)
                                 : Colors.transparent,
                             borderRadius: BorderRadius.circular(8),
                             border: isSelected
-                                ? Border.all(color: Colors.blueAccent, width: 1)
+                                ? Border.all(color: Colors.blue, width: 1)
                                 : Border.all(color: Colors.transparent),
                           ),
                           child: ListTile(
@@ -1085,13 +1246,20 @@ class _ChatScreenState extends State<ChatScreen> {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                                color: isSelected ? Colors.blueAccent : Colors.black87,
+                                fontWeight: isSelected
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                color: isSelected
+                                    ? Colors.blue
+                                    : Colors.black87,
                               ),
                             ),
                             subtitle: Text(
                               device["device_type"] ?? "pc",
-                              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey.shade600,
+                              ),
                             ),
                             onTap: () {
                               setState(() {
@@ -1129,7 +1297,10 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             const Divider(height: 1),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 16.0,
+                vertical: 8.0,
+              ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -1149,9 +1320,14 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   if (selectedDeviceId != null)
                     IconButton(
-                      icon: const Icon(Icons.add_circle_outline, color: Colors.blueAccent, size: 22),
+                      icon: const Icon(
+                        Icons.add_circle_outline,
+                        color: Colors.blue,
+                        size: 22,
+                      ),
                       tooltip: "새 대화 시작",
-                      onPressed: () => _createNewSessionForDevice(selectedDeviceId!),
+                      onPressed: () =>
+                          _createNewSessionForDevice(selectedDeviceId!),
                     ),
                 ],
               ),
@@ -1194,7 +1370,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                         decoration: BoxDecoration(
                           color: isSelected
-                              ? Colors.blueAccent.withValues(alpha: 0.1)
+                              ? Colors.blue.withValues(alpha: 0.1)
                               : Colors.transparent,
                           borderRadius: BorderRadius.circular(8),
                         ),
@@ -1205,8 +1381,10 @@ class _ChatScreenState extends State<ChatScreen> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                              color: isSelected ? Colors.blueAccent : Colors.black87,
+                              fontWeight: isSelected
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
+                              color: isSelected ? Colors.blue : Colors.black87,
                             ),
                           ),
                           onTap: () {
@@ -1217,7 +1395,11 @@ class _ChatScreenState extends State<ChatScreen> {
                             icon: const Icon(Icons.more_horiz, size: 18),
                             onSelected: (value) {
                               if (value == 'rename') {
-                                _renameSession(session.id, selectedDeviceId!, session.title);
+                                _renameSession(
+                                  session.id,
+                                  selectedDeviceId!,
+                                  session.title,
+                                );
                               } else if (value == 'delete') {
                                 _deleteSession(session.id, selectedDeviceId!);
                               }
@@ -1241,7 +1423,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       );
                     },
                   );
-                }
+                },
               ),
             ),
             const Divider(height: 1),
@@ -1257,18 +1439,7 @@ class _ChatScreenState extends State<ChatScreen> {
               trailing: IconButton(
                 icon: const Icon(Icons.logout, color: Colors.redAccent),
                 tooltip: '로그아웃',
-                onPressed: () async {
-                  await api.logout();
-                  if (mounted) {
-                    setState(() {
-                      _hasSelectedDevice = false;
-                    });
-                    Navigator.of(context).pushAndRemoveUntil(
-                      MaterialPageRoute(builder: (_) => const LoginScreen()),
-                      (route) => false,
-                    );
-                  }
-                },
+                onPressed: _isLoggingOut ? null : _handleLogout,
               ),
             ),
             const SizedBox(height: 8),
@@ -1292,13 +1463,13 @@ class _ChatScreenState extends State<ChatScreen> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: LinearGradient(
-                  colors: [Colors.blueAccent, Colors.purpleAccent.shade100],
+                  colors: [Colors.blue, Colors.blue.shade300],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.blueAccent.withValues(alpha: 0.3),
+                    color: Colors.blue.withValues(alpha: 0.3),
                     blurRadius: 20,
                     offset: const Offset(0, 10),
                   ),
@@ -1349,80 +1520,83 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: CircularProgressIndicator(),
                   )
                 : filteredDevices.isEmpty
-                    ? Column(
-                        children: [
-                          const Text(
-                            "등록된 PC 기기가 없습니다.",
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                          const SizedBox(height: 12),
-                          IconButton(
-                            icon: const Icon(Icons.refresh),
-                            onPressed: _loadDevices,
-                          ),
-                        ],
-                      )
-                    : ListView.builder(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        itemCount: filteredDevices.length,
-                        itemBuilder: (context, index) {
-                          final device = filteredDevices[index];
-                          final deviceId = device["device_id"] ?? "";
-                          final deviceName = device["device_name"] ?? "Unknown Device";
-                          final isOnline = device["is_online"] ?? false;
-
-                          return Container(
-                            margin: const EdgeInsets.symmetric(vertical: 6),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.grey.shade200),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.03),
-                                  blurRadius: 6,
-                                  offset: const Offset(0, 3),
-                                ),
-                              ],
-                            ),
-                            child: ListTile(
-                              leading: Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: isOnline
-                                      ? Colors.green.shade50
-                                      : Colors.grey.shade100,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Icon(
-                                  Icons.desktop_windows_rounded,
-                                  color: isOnline ? Colors.green : Colors.grey,
-                                ),
-                              ),
-                              title: Text(
-                                deviceName,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.black87,
-                                ),
-                              ),
-                              subtitle: Text(
-                                isOnline ? "온라인" : "오프라인",
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: isOnline ? Colors.green.shade700 : Colors.grey,
-                                ),
-                              ),
-                              trailing: const Icon(
-                                Icons.chevron_right_rounded,
-                                color: Colors.grey,
-                              ),
-                              onTap: () => _selectDeviceAndGo(deviceId),
-                            ),
-                          );
-                        },
+                ? Column(
+                    children: [
+                      const Text(
+                        "등록된 PC 기기가 없습니다.",
+                        style: TextStyle(color: Colors.grey),
                       ),
+                      const SizedBox(height: 12),
+                      IconButton(
+                        icon: const Icon(Icons.refresh),
+                        onPressed: _loadDevices,
+                      ),
+                    ],
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: filteredDevices.length,
+                    itemBuilder: (context, index) {
+                      final device = filteredDevices[index];
+                      final deviceId = device["device_id"] ?? "";
+                      final deviceName =
+                          device["device_name"] ?? "Unknown Device";
+                      final isOnline = device["is_online"] ?? false;
+
+                      return Container(
+                        margin: const EdgeInsets.symmetric(vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.grey.shade200),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.03),
+                              blurRadius: 6,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: ListTile(
+                          leading: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: isOnline
+                                  ? Colors.green.shade50
+                                  : Colors.grey.shade100,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              Icons.desktop_windows_rounded,
+                              color: isOnline ? Colors.green : Colors.grey,
+                            ),
+                          ),
+                          title: Text(
+                            deviceName,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87,
+                            ),
+                          ),
+                          subtitle: Text(
+                            isOnline ? "온라인" : "오프라인",
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: isOnline
+                                  ? Colors.green.shade700
+                                  : Colors.grey,
+                            ),
+                          ),
+                          trailing: const Icon(
+                            Icons.chevron_right_rounded,
+                            color: Colors.grey,
+                          ),
+                          onTap: () => _selectDeviceAndGo(deviceId),
+                        ),
+                      );
+                    },
+                  ),
           ],
         ),
       ),
@@ -1432,9 +1606,10 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildEmptyChatScreen() {
     final deviceName = selectedDeviceId != null
         ? (devices.firstWhere(
-            (d) => d["device_id"] == selectedDeviceId,
-            orElse: () => {"device_name": "선택된 기기"},
-          )["device_name"] ?? "선택된 기기")
+                (d) => d["device_id"] == selectedDeviceId,
+                orElse: () => {"device_name": "선택된 기기"},
+              )["device_name"] ??
+              "선택된 기기")
         : "선택된 기기";
 
     return Center(
@@ -1446,7 +1621,7 @@ class _ChatScreenState extends State<ChatScreen> {
           borderRadius: BorderRadius.circular(24),
           boxShadow: [
             BoxShadow(
-              color: Colors.blueAccent.withValues(alpha: 0.08),
+              color: Colors.blue.withValues(alpha: 0.08),
               blurRadius: 30,
               offset: const Offset(0, 10),
             ),
@@ -1464,8 +1639,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 shape: BoxShape.circle,
                 gradient: LinearGradient(
                   colors: [
-                    Colors.blueAccent.withValues(alpha: 0.2),
-                    Colors.purpleAccent.withValues(alpha: 0.1)
+                    Colors.blue.withValues(alpha: 0.15),
+                    Colors.blue.withValues(alpha: 0.05),
                   ],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
@@ -1474,7 +1649,7 @@ class _ChatScreenState extends State<ChatScreen> {
               child: const Icon(
                 Icons.chat_bubble_outline_rounded,
                 size: 48,
-                color: Colors.blueAccent,
+                color: Colors.blue,
               ),
             ),
             const SizedBox(height: 24),
@@ -1501,13 +1676,13 @@ class _ChatScreenState extends State<ChatScreen> {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(16),
                 gradient: const LinearGradient(
-                  colors: [Colors.blueAccent, Colors.purpleAccent],
+                  colors: [Colors.blue, Color(0xFF1565C0)],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.blueAccent.withValues(alpha: 0.3),
+                    color: Colors.blue.withValues(alpha: 0.3),
                     blurRadius: 12,
                     offset: const Offset(0, 4),
                   ),
@@ -1518,7 +1693,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   backgroundColor: Colors.transparent,
                   shadowColor: Colors.transparent,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 28,
+                    vertical: 16,
+                  ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                   ),
@@ -1526,10 +1704,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 icon: const Icon(Icons.add, size: 20),
                 label: const Text(
                   "새 대화 시작하기",
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
                 onPressed: selectedDeviceId != null
                     ? () => _createNewSessionForDevice(selectedDeviceId!)
@@ -1542,18 +1717,18 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-
-
   @override
   Widget build(BuildContext context) {
     String titleText = "AI Agent";
     if (currentSessionId != null && sessions.containsKey(currentSessionId)) {
       titleText = sessions[currentSessionId!]!.title;
     } else if (_hasSelectedDevice && selectedDeviceId != null) {
-      final deviceName = devices.firstWhere(
-        (d) => d["device_id"] == selectedDeviceId,
-        orElse: () => {"device_name": ""},
-      )["device_name"] ?? "";
+      final deviceName =
+          devices.firstWhere(
+            (d) => d["device_id"] == selectedDeviceId,
+            orElse: () => {"device_name": ""},
+          )["device_name"] ??
+          "";
       titleText = deviceName.isNotEmpty ? "$deviceName 대화방" : "새 대화";
     }
     final showDrawer = _hasSelectedDevice;
@@ -1562,21 +1737,36 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(
         title: Text(titleText),
         automaticallyImplyLeading: showDrawer,
+        actions: [
+          IconButton(
+            tooltip: '로그아웃',
+            onPressed: _isLoggingOut ? null : _handleLogout,
+            icon: const Icon(Icons.logout),
+          ),
+        ],
       ),
       drawer: showDrawer ? _buildDrawer(filteredDevices) : null,
       body: SafeArea(
         child: currentSessionId == null
-            ? (_hasSelectedDevice ? _buildEmptyChatScreen() : _buildIntroScreen())
+            ? (_hasSelectedDevice
+                  ? _buildEmptyChatScreen()
+                  : _buildIntroScreen())
             : Column(
                 children: [
                   if (pendingToolId != null)
                     Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
                         color: Colors.amber.shade50.withValues(alpha: 0.95),
                         borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.amber.shade300, width: 1.5),
+                        border: Border.all(
+                          color: Colors.amber.shade300,
+                          width: 1.5,
+                        ),
                         boxShadow: [
                           BoxShadow(
                             color: Colors.black.withValues(alpha: 0.08),
@@ -1590,7 +1780,11 @@ class _ChatScreenState extends State<ChatScreen> {
                         children: [
                           Row(
                             children: [
-                              Icon(Icons.gpp_maybe_rounded, color: Colors.amber.shade800, size: 28),
+                              Icon(
+                                Icons.gpp_maybe_rounded,
+                                color: Colors.amber.shade800,
+                                size: 28,
+                              ),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(
@@ -1621,10 +1815,15 @@ class _ChatScreenState extends State<ChatScreen> {
                             ],
                           ),
                           const SizedBox(height: 12),
-                          if (pendingMessage != null && pendingMessage!.isNotEmpty) ...[
+                          if (pendingMessage != null &&
+                              pendingMessage!.isNotEmpty) ...[
                             Text(
                               pendingMessage!,
-                              style: const TextStyle(fontSize: 14, color: Colors.black87, height: 1.4),
+                              style: const TextStyle(
+                                fontSize: 14,
+                                color: Colors.black87,
+                                height: 1.4,
+                              ),
                             ),
                             const SizedBox(height: 12),
                           ],
@@ -1634,7 +1833,9 @@ class _ChatScreenState extends State<ChatScreen> {
                               decoration: BoxDecoration(
                                 color: Colors.white.withValues(alpha: 0.8),
                                 borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: Colors.amber.shade100),
+                                border: Border.all(
+                                  color: Colors.amber.shade100,
+                                ),
                               ),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1651,7 +1852,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                   Text(
                                     pendingToolArgs is String
                                         ? pendingToolArgs
-                                        : const JsonEncoder.withIndent('  ').convert(pendingToolArgs),
+                                        : const JsonEncoder.withIndent(
+                                            '  ',
+                                          ).convert(pendingToolArgs),
                                     style: const TextStyle(
                                       fontFamily: 'monospace',
                                       fontSize: 12,
@@ -1669,9 +1872,17 @@ class _ChatScreenState extends State<ChatScreen> {
                               OutlinedButton(
                                 style: OutlinedButton.styleFrom(
                                   foregroundColor: Colors.redAccent,
-                                  side: const BorderSide(color: Colors.redAccent, width: 1.5),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                                  side: const BorderSide(
+                                    color: Colors.redAccent,
+                                    width: 1.5,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 20,
+                                    vertical: 10,
+                                  ),
                                 ),
                                 onPressed: () => _handleApprove(false),
                                 child: const Text(
@@ -1684,8 +1895,13 @@ class _ChatScreenState extends State<ChatScreen> {
                                 style: ElevatedButton.styleFrom(
                                   backgroundColor: Colors.amber.shade800,
                                   foregroundColor: Colors.white,
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 20,
+                                    vertical: 10,
+                                  ),
                                   elevation: 2,
                                 ),
                                 onPressed: () => _handleApprove(true),
@@ -1770,7 +1986,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                 child: SizedBox(
                                   width: 24,
                                   height: 24,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
                                 ),
                               ),
                             ),
@@ -1778,7 +1996,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     ),
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
                     child: Row(
                       children: [
                         IconButton(
@@ -1800,38 +2021,44 @@ class _ChatScreenState extends State<ChatScreen> {
                                 borderRadius: BorderRadius.circular(12),
                               ),
                               contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 16, vertical: 12),
+                                horizontal: 16,
+                                vertical: 12,
+                              ),
                             ),
                           ),
                         ),
                         const SizedBox(width: 8),
-                        if (currentSessionId != null &&
-                            sessions[currentSessionId!]?.currentNode.isNotEmpty == true) ...[
-                          CircleAvatar(
-                            radius: 24,
-                            backgroundColor: Colors.redAccent,
-                            child: IconButton(
-                              color: Colors.white,
-                              icon: const Icon(Icons.stop),
-                              onPressed: () {
-                                api.sendStop(currentSessionId!);
-                                setState(() {
-                                  sessions[currentSessionId!]!.currentNode = "";
-                                });
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        CircleAvatar(
-                          radius: 24,
-                          backgroundColor: Theme.of(context).colorScheme.primary,
-                          child: IconButton(
-                            color: Colors.white,
-                            icon: const Icon(Icons.send),
-                            onPressed: sendMessage,
-                          ),
-                        ),
+                        currentSessionId != null &&
+                                sessions[currentSessionId!]
+                                        ?.currentNode
+                                        .isNotEmpty ==
+                                    true
+                            ? CircleAvatar(
+                                radius: 24,
+                                backgroundColor: Colors.redAccent,
+                                child: IconButton(
+                                  color: Colors.white,
+                                  icon: const Icon(Icons.stop),
+                                  onPressed: () {
+                                    api.sendStop(currentSessionId!);
+                                    setState(() {
+                                      sessions[currentSessionId!]!.currentNode =
+                                          "";
+                                    });
+                                  },
+                                ),
+                              )
+                            : CircleAvatar(
+                                radius: 24,
+                                backgroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.primary,
+                                child: IconButton(
+                                  color: Colors.white,
+                                  icon: const Icon(Icons.send),
+                                  onPressed: sendMessage,
+                                ),
+                              ),
                       ],
                     ),
                   ),

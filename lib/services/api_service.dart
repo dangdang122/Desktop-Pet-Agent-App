@@ -1,15 +1,31 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:math';
+import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../screens/login_screen.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 class ApiService {
   static final ApiService _instance = ApiService._internal();
   factory ApiService() => _instance;
-  ApiService._internal();
+  ApiService._internal()
+    : _httpClient = http.Client(),
+      _connectChannel = WebSocketChannel.connect;
+
+  @visibleForTesting
+  ApiService.forTesting({
+    required http.Client httpClient,
+    required WebSocketChannel Function(Uri) connectChannel,
+  }) : _httpClient = httpClient,
+       _connectChannel = connectChannel;
+
+  final http.Client _httpClient;
+  final WebSocketChannel Function(Uri) _connectChannel;
 
   // ==========================================
   // [설정 값] 게이트웨이 및 에이전트 연동 정보
@@ -17,7 +33,8 @@ class ApiService {
   // TODO: 개발 환경에 따라 아래의 설정을 알맞게 수정해주세요.
   final String gatewayHost = "https://petagent.aikopo.net"; // 게이트웨이 서버 IP 및 포트
   String userId = ""; // 사용자 고유 ID (로그인 시 동적 업데이트)
-  final String targetAgentId = "DESKTOP-NMCL2T9-1"; // 제어 대상 Agent의 고유 ID (PC이름-1)
+  final String targetAgentId =
+      "DESKTOP-H3K9F8J-1"; // 제어 대상 Agent의 고유 ID (PC이름-1)
 
   final String baseUrl = "https://petagent.aikopo.net"; // 기존 이미지 업로드 API 서버 주소
   String? token;
@@ -25,22 +42,25 @@ class ApiService {
 
   // 호스트 PC의 사설 IP 주소를 이용해 에뮬레이터 및 실기기 모두에서 PC 로컬 에이전트와 동기화합니다.
   String get localAgentUrl => "http://192.168.24.206:8001";
-  
+
   String get wsUrl {
     final host = gatewayHost.trim();
     final urlBase = host.startsWith("http://")
         ? host.replaceFirst("http://", "ws://")
         : host.startsWith("https://")
-            ? host.replaceFirst("https://", "wss://")
-            : host.startsWith("ws://") || host.startsWith("wss://")
-                ? host
-                : "ws://$host";
+        ? host.replaceFirst("https://", "wss://")
+        : host.startsWith("ws://") || host.startsWith("wss://")
+        ? host
+        : "ws://$host";
     return "$urlBase/ws?token=${token ?? ''}";
   }
-  
+
   String? sessionId;
   WebSocketChannel? _channel;
   final Set<String> _sentMessageIds = {};
+  StreamSubscription<dynamic>? _socketSubscription;
+  Future<void>? _logoutFuture;
+  bool _handlingAuthError = false;
 
   // Stream to broadcast incoming messages from the server
   final StreamController<Map<String, dynamic>> _messageController =
@@ -52,7 +72,7 @@ class ApiService {
   String generateUuidV4() {
     final random = Random.secure();
     String hexDigit(int value) => value.toRadixString(16);
-    
+
     final buffer = StringBuffer();
     for (var i = 0; i < 36; i++) {
       if (i == 8 || i == 13 || i == 18 || i == 23) {
@@ -71,7 +91,7 @@ class ApiService {
   void connect() {
     if (_channel != null) return;
 
-    _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+    _channel = _connectChannel(Uri.parse(wsUrl));
 
     // 연결 직후 App 클라이언트 등록 메시지 전송
     final regMessage = {
@@ -81,15 +101,12 @@ class ApiService {
         "client_id": "flutter_app_${generateUuidV4()}",
         "timestamp": DateTime.now().toUtc().toIso8601String(),
         if (token != null) "token": token,
-      }
+      },
     };
     _channel!.sink.add(jsonEncode(regMessage));
 
-    _channel!.stream.listen(
+    _socketSubscription = _channel!.stream.listen(
       (data) {
-        // 웹소켓 수신 데이터 로그 출력 (디버깅용)
-        print("[WebSocket Recv] $data");
-
         try {
           final decoded = jsonDecode(data);
           final String? type = decoded["type"];
@@ -106,7 +123,7 @@ class ApiService {
               "type": "pong",
               "payload": {
                 "timestamp": DateTime.now().toUtc().toIso8601String(),
-              }
+              },
             };
             _channel?.sink.add(jsonEncode(pongMessage));
             return;
@@ -143,23 +160,9 @@ class ApiService {
             mappedData["tool_name"] = rawPayload["tool_name"] ?? "";
             mappedData["tool_args"] = rawPayload["tool_args"];
           } else if (type == "done") {
-            // Planner나 Worker 노드 필터링 때문에 메시지가 생략되는 것을 방지하기 위해 노드 초기화
-            _messageController.add({
-              "session_id": payloadSessionId ?? sessionId,
-              "status": "node_start",
-              "node": "aggregator",
-            });
-
-            // 최종 답변 메시지가 들어있을 경우 UI에 전달 (스트림 청크 형태로)
-            final String? finalMsg = rawPayload["final_message"];
-            if (finalMsg != null && finalMsg.isNotEmpty) {
-              _messageController.add({
-                "session_id": payloadSessionId ?? sessionId,
-                "status": "stream_chunk",
-                "chunk": finalMsg,
-              });
-            }
+            // 최종 전문은 청크로 덧붙이지 않고 UI에서 기존 응답을 확정한다.
             mappedData["status"] = "stream_end";
+            mappedData["final_message"] = rawPayload["final_message"];
           } else if (type == "error") {
             mappedData["status"] = "error";
             mappedData["message"] = rawPayload["message"] ?? "서버 오류";
@@ -170,7 +173,9 @@ class ApiService {
             }
             mappedData["status"] = "chat_message";
             mappedData["message"] = rawPayload["message"] ?? "";
-            mappedData["images"] = List<String>.from(rawPayload["images"] ?? []);
+            mappedData["images"] = List<String>.from(
+              rawPayload["images"] ?? [],
+            );
           } else if (type == "session_sync") {
             mappedData["status"] = "session_sync";
             mappedData["sessions"] = rawPayload["sessions"];
@@ -190,13 +195,13 @@ class ApiService {
             mappedData["title"] = rawPayload["title"];
           } else if (type == "status") {
             mappedData["status"] = "agent_status";
-            mappedData["agent_status"] = rawPayload["status"]; // "busy" or "ready"
+            mappedData["agent_status"] =
+                rawPayload["status"]; // "busy" or "ready"
           } else {
             // 그 외 처리되지 않은 타입은 스킵
             return;
           }
 
-          print("[Mapped Output] $mappedData");
           _messageController.add(mappedData);
         } catch (e) {
           _messageController.add({
@@ -219,8 +224,11 @@ class ApiService {
   }
 
   void disconnect() {
-    _channel?.sink.close();
+    final channel = _channel;
     _channel = null;
+    _socketSubscription?.cancel();
+    _socketSubscription = null;
+    channel?.sink.close();
   }
 
   void sendChat(String message, {List<String>? imageUrls, String? sessionId}) {
@@ -241,7 +249,7 @@ class ApiService {
         "message": message,
         "images": imageUrls ?? [],
         "timestamp": DateTime.now().toUtc().toIso8601String(),
-      }
+      },
     };
 
     _channel?.sink.add(jsonEncode(chatMessage));
@@ -250,7 +258,10 @@ class ApiService {
   Future<List<String>> uploadImages(List<XFile> files) async {
     if (files.isEmpty) return [];
 
-    var request = http.MultipartRequest('POST', Uri.parse("$baseUrl/upload"));
+    var request = http.MultipartRequest(
+      'POST',
+      Uri.parse("$baseUrl/api/upload"),
+    );
 
     for (var file in files) {
       request.files.add(
@@ -261,9 +272,9 @@ class ApiService {
       );
     }
 
-    var streamedResponse = await request.send();
+    var streamedResponse = await _httpClient.send(request);
     var response = await http.Response.fromStream(streamedResponse);
-
+    await _checkAuthError(response.statusCode);
     if (response.statusCode == 200) {
       var decoded = jsonDecode(response.body);
       if (decoded is List) {
@@ -292,7 +303,7 @@ class ApiService {
         "session_id": targetSessionId,
         "approve": approve,
         "timestamp": DateTime.now().toUtc().toIso8601String(),
-      }
+      },
     };
 
     _channel?.sink.add(jsonEncode(approveMessage));
@@ -305,9 +316,9 @@ class ApiService {
       "type": "get_history",
       "payload": {
         "session_id": sessionId,
-        if (deviceId != null) "device_id": deviceId,
+        "device_id": ?deviceId,
         "timestamp": DateTime.now().toUtc().toIso8601String(),
-      }
+      },
     };
     _channel?.sink.add(jsonEncode(msg));
   }
@@ -319,9 +330,9 @@ class ApiService {
       "type": "session_created",
       "payload": {
         "session_id": sessionId,
-        if (deviceId != null) "device_id": deviceId,
+        "device_id": ?deviceId,
         "timestamp": DateTime.now().toUtc().toIso8601String(),
-      }
+      },
     };
     _channel?.sink.add(jsonEncode(msg));
   }
@@ -333,9 +344,9 @@ class ApiService {
       "type": "session_deleted",
       "payload": {
         "session_id": sessionId,
-        if (deviceId != null) "device_id": deviceId,
+        "device_id": ?deviceId,
         "timestamp": DateTime.now().toUtc().toIso8601String(),
-      }
+      },
     };
     _channel?.sink.add(jsonEncode(msg));
   }
@@ -349,9 +360,9 @@ class ApiService {
         "session_id": sessionId,
         "title": title,
         "message_id": generateUuidV4(),
-        if (deviceId != null) "device_id": deviceId,
+        "device_id": ?deviceId,
         "timestamp": DateTime.now().toUtc().toIso8601String(),
-      }
+      },
     };
     _channel?.sink.add(jsonEncode(msg));
   }
@@ -363,7 +374,7 @@ class ApiService {
   Map<String, dynamic> _decodeJwt(String token) {
     try {
       final parts = token.split('.');
-      if (parts.length < 2) {
+      if (parts.length != 3 || parts.any((part) => part.isEmpty)) {
         throw Exception('Invalid JWT format');
       }
       final payload = parts[1];
@@ -376,6 +387,40 @@ class ApiService {
     }
   }
 
+  // 화면 라우팅용 만료 검사이며, 토큰 서명/권한 검증은 서버가 수행한다.
+  bool isTokenExpired({String? authToken, DateTime? now}) {
+    final currentToken = authToken ?? token;
+    if (currentToken == null || currentToken.isEmpty) return true;
+
+    try {
+      final expiry = _decodeJwt(currentToken)["exp"];
+      if (expiry is! num || !expiry.isFinite) return true;
+      final seconds =
+          (now ?? DateTime.now()).microsecondsSinceEpoch /
+          Duration.microsecondsPerSecond;
+      return seconds >= expiry;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<void> _saveCredentials(String? receivedToken, String userEmail) async {
+    if (receivedToken == null || isTokenExpired(authToken: receivedToken)) {
+      throw Exception('유효한 로그인 토큰을 받지 못했습니다. 다시 로그인해주세요.');
+    }
+    final decoded = _decodeJwt(receivedToken);
+    final decodedUserId =
+        (decoded["user_id"] ?? decoded["sub"] ?? decoded["id"])?.toString() ??
+        "";
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString("auth_token", receivedToken);
+    await prefs.setString("user_email", userEmail);
+    await prefs.setString("user_id", decodedUserId);
+    token = receivedToken;
+    email = userEmail;
+    userId = decodedUserId;
+  }
+
   Future<Map<String, dynamic>> signUp({
     required String name,
     required String email,
@@ -384,7 +429,7 @@ class ApiService {
     required String deviceType,
     required String deviceName,
   }) async {
-    final response = await http.post(
+    final response = await _httpClient.post(
       Uri.parse("$baseUrl/api/auth/signup"),
       headers: {"Content-Type": "application/json"},
       body: jsonEncode({
@@ -400,35 +445,23 @@ class ApiService {
     if (response.statusCode == 200 || response.statusCode == 201) {
       final data = jsonDecode(response.body);
       final String? receivedToken = data["access_token"];
-      if (receivedToken != null) {
-        token = receivedToken;
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString("auth_token", receivedToken);
-        await prefs.setString("user_email", email);
-        this.email = email;
-        
-        // JWT 디코딩하여 user_id 추출
-        final decoded = _decodeJwt(receivedToken);
-        final String? decodedUserId = decoded["user_id"] ?? decoded["sub"] ?? decoded["id"];
-        if (decodedUserId != null) {
-          userId = decodedUserId;
-          await prefs.setString("user_id", decodedUserId);
-        }
-      }
+      await _saveCredentials(receivedToken, email);
 
       // Sync signup with local python agent
       try {
-        await http.post(
-          Uri.parse("$localAgentUrl/api/signup"),
-          headers: {"Content-Type": "application/json"},
-          body: jsonEncode({
-            "email": email,
-            "password": password,
-            "name": name,
-          }),
-        ).timeout(const Duration(seconds: 2));
+        await _httpClient
+            .post(
+              Uri.parse("$localAgentUrl/api/signup"),
+              headers: {"Content-Type": "application/json"},
+              body: jsonEncode({
+                "email": email,
+                "password": password,
+                "name": name,
+              }),
+            )
+            .timeout(const Duration(seconds: 2));
       } catch (e) {
-        print("Failed to sync signup with local agent: $e");
+        debugPrint("Failed to sync signup with local agent: $e");
       }
 
       return data;
@@ -445,7 +478,7 @@ class ApiService {
     required String deviceType,
     required String deviceName,
   }) async {
-    final response = await http.post(
+    final response = await _httpClient.post(
       Uri.parse("$baseUrl/api/auth/login"),
       headers: {"Content-Type": "application/json"},
       body: jsonEncode({
@@ -460,35 +493,20 @@ class ApiService {
     if (response.statusCode == 200 || response.statusCode == 201) {
       final data = jsonDecode(response.body);
       final String? receivedToken = data["access_token"];
-      
-      if (receivedToken != null) {
-        token = receivedToken;
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString("auth_token", receivedToken);
-        await prefs.setString("user_email", email);
-        this.email = email;
-        
-        // JWT 디코딩하여 user_id 추출
-        final decoded = _decodeJwt(receivedToken);
-        final String? decodedUserId = decoded["user_id"] ?? decoded["sub"] ?? decoded["id"];
-        if (decodedUserId != null) {
-          userId = decodedUserId;
-          await prefs.setString("user_id", decodedUserId);
-        }
-      }
+
+      await _saveCredentials(receivedToken, email);
 
       // Sync login with local python agent
       try {
-        await http.post(
-          Uri.parse("$localAgentUrl/api/login"),
-          headers: {"Content-Type": "application/json"},
-          body: jsonEncode({
-            "email": email,
-            "password": password,
-          }),
-        ).timeout(const Duration(seconds: 2));
+        await _httpClient
+            .post(
+              Uri.parse("$localAgentUrl/api/login"),
+              headers: {"Content-Type": "application/json"},
+              body: jsonEncode({"email": email, "password": password}),
+            )
+            .timeout(const Duration(seconds: 2));
       } catch (e) {
-        print("Failed to sync login with local agent: $e");
+        debugPrint("Failed to sync login with local agent: $e");
       }
 
       return data;
@@ -500,37 +518,43 @@ class ApiService {
 
   Future<void> loadCredentials() async {
     final prefs = await SharedPreferences.getInstance();
-    final storedUserId = prefs.getString("user_id");
-    final storedToken = prefs.getString("auth_token");
-    final storedEmail = prefs.getString("user_email");
-    if (storedUserId != null) {
-      userId = storedUserId;
-    }
-    if (storedToken != null) {
-      token = storedToken;
-    }
-    if (storedEmail != null) {
-      email = storedEmail;
+    userId = prefs.getString("user_id") ?? "";
+    token = prefs.getString("auth_token");
+    email = prefs.getString("user_email");
+    if (isTokenExpired()) {
+      await _clearCredentials();
     }
   }
 
-  Future<void> logout() async {
+  Future<void> _clearCredentials() async {
     disconnect();
     token = null;
     email = null;
     userId = "";
+    sessionId = null;
+    _sentMessageIds.clear();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove("user_id");
     await prefs.remove("auth_token");
     await prefs.remove("user_email");
+  }
+
+  Future<void> logout() {
+    return _logoutFuture ??= _performLogout().whenComplete(() {
+      _logoutFuture = null;
+    });
+  }
+
+  Future<void> _performLogout() async {
+    await _clearCredentials();
 
     // Sync logout with local python agent
     try {
-      await http.post(
-        Uri.parse("$localAgentUrl/api/logout"),
-      ).timeout(const Duration(seconds: 2));
+      await _httpClient
+          .post(Uri.parse("$localAgentUrl/api/logout"))
+          .timeout(const Duration(seconds: 2));
     } catch (e) {
-      print("Failed to sync logout with local agent: $e");
+      debugPrint("Failed to sync logout with local agent: $e");
     }
   }
 
@@ -539,13 +563,14 @@ class ApiService {
   // ==========================================
 
   Future<List<Map<String, dynamic>>> getDevices() async {
-    final response = await http.get(
+    final response = await _httpClient.get(
       Uri.parse("$baseUrl/api/devices"),
       headers: {
         "Authorization": "Bearer $token",
         "Content-Type": "application/json",
       },
     );
+    await _checkAuthError(response.statusCode);
     if (response.statusCode == 200) {
       final dynamic data = jsonDecode(response.body);
       if (data is List) {
@@ -559,7 +584,7 @@ class ApiService {
   }
 
   Future<void> updateDeviceName(String deviceId, String newName) async {
-    final response = await http.patch(
+    final response = await _httpClient.patch(
       Uri.parse("$baseUrl/api/devices/$deviceId"),
       headers: {
         "Authorization": "Bearer $token",
@@ -567,6 +592,7 @@ class ApiService {
       },
       body: jsonEncode({"device_name": newName}),
     );
+    await _checkAuthError(response.statusCode);
     if (response.statusCode != 200 && response.statusCode != 204) {
       final responseBody = jsonDecode(response.body);
       throw Exception(responseBody["detail"] ?? "기기 이름 변경에 실패했습니다.");
@@ -574,31 +600,36 @@ class ApiService {
   }
 
   Future<void> deleteDevice(String deviceId) async {
-    final response = await http.delete(
+    final response = await _httpClient.delete(
       Uri.parse("$baseUrl/api/devices/$deviceId"),
       headers: {
         "Authorization": "Bearer $token",
         "Content-Type": "application/json",
       },
     );
+    await _checkAuthError(response.statusCode);
     if (response.statusCode != 200 && response.statusCode != 204) {
       final responseBody = jsonDecode(response.body);
       throw Exception(responseBody["detail"] ?? "기기 제거에 실패했습니다.");
     }
   }
 
-  Future<Map<String, dynamic>> getHistoryHttp(String sessionId, {String? deviceId}) async {
+  Future<Map<String, dynamic>> getHistoryHttp(
+    String sessionId, {
+    String? deviceId,
+  }) async {
     var url = "$baseUrl/api/history/$sessionId";
     if (deviceId != null) {
       url += "?device_id=$deviceId";
     }
-    final response = await http.get(
+    final response = await _httpClient.get(
       Uri.parse(url),
       headers: {
         "Authorization": "Bearer $token",
         "Content-Type": "application/json",
       },
     );
+    await _checkAuthError(response.statusCode);
     if (response.statusCode == 200) {
       return jsonDecode(response.body);
     } else {
@@ -611,10 +642,34 @@ class ApiService {
     if (_channel == null) connect();
     final Map<String, dynamic> stopMsg = {
       "type": "stop",
-      "payload": {
-        "session_id": sessionId,
-      }
+      "payload": {"session_id": sessionId},
     };
     _channel?.sink.add(jsonEncode(stopMsg));
+  }
+
+  Future<void> _checkAuthError(int statusCode) async {
+    if (statusCode == 401 || statusCode == 403) {
+      if (_handlingAuthError) throw Exception("Authentication expired");
+      _handlingAuthError = true;
+      try {
+        await logout();
+        final context = navigatorKey.currentContext;
+        if (context != null && context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("인증 토큰이 만료되었습니다. 다시 로그인해주세요."),
+              backgroundColor: Colors.redAccent,
+            ),
+          );
+        }
+        navigatorKey.currentState?.pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => LoginScreen(api: this)),
+          (route) => false,
+        );
+      } finally {
+        _handlingAuthError = false;
+      }
+      throw Exception("Authentication expired");
+    }
   }
 }
